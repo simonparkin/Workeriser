@@ -410,6 +410,24 @@ async function findAnyDateForWorker(worker){
   return meta.lastDate[worker] || null;
 }
 
+// snapshots a worker's day before it's cleared, so historical reports survive
+// even after their live working list has been reset
+async function archiveBeforeClear(worker,date){
+  const [jobs, prog] = await Promise.all([loadJobs(worker,date), loadProgress(worker,date)]);
+  if(jobs && jobs.length){
+    await fsSet(`report_${worker}_${date}`, { jobs, prog });
+  }
+}
+
+// reads data for reporting: prefers an archived snapshot (taken at Clear time) over
+// live data, so a cleared day's report still reflects what actually happened that day
+async function loadForReport(worker,date){
+  const snap = await fsGet(`report_${worker}_${date}`);
+  if(snap) return snap;
+  const [jobs, prog] = await Promise.all([loadJobs(worker,date), loadProgress(worker,date)]);
+  return { jobs, prog };
+}
+
 // moves a set of jobs (by id) from one worker's round to another's, for the same date,
 // carrying over any progress (payment/price/note) already recorded against them
 async function moveJobsToWorker(fromWorker, toWorker, date, jobIds){
@@ -657,6 +675,11 @@ function resolvedPrice(job, p){
   return (p && p.price !== undefined && p.price !== '' && !isNaN(parseFloat(p.price))) ? parseFloat(p.price) : job.price;
 }
 
+// skipped/cancelled jobs weren't actually cleaned, so no charge applies for the day
+function chargeForStatus(price, status){
+  return (status==='skipped' || status==='cancelled') ? 0 : price;
+}
+
 /* ================= RENDER ROUTER ================= */
 let lastScreenRendered = null;
 async function render(){
@@ -684,10 +707,10 @@ function renderNeedsSetup(){
 
 /* ================= LOGIN ================= */
 async function renderLogin(){
+  const today = todayStr();
   const info = await Promise.all(WORKERS.map(async w=>{
-    const date = await findAnyDateForWorker(w);
-    const jobs = date ? await loadJobs(w,date) : null;
-    return { date, hasJobs: !!(jobs && jobs.length) };
+    const jobs = await loadJobs(w,today);
+    return { date: today, hasJobs: !!(jobs && jobs.length) };
   }));
   app.innerHTML = '';
   const wrap = document.createElement('div');
@@ -722,7 +745,7 @@ async function renderLogin(){
 /* ================= WORKER JOB LIST ================= */
 async function renderWorker(){
   const worker = state.worker;
-  const date = state.date || await findAnyDateForWorker(worker) || todayStr();
+  const date = state.date || todayStr();
   state.date = date;
   const [jobs, prog] = await Promise.all([loadJobs(worker,date), loadProgress(worker,date)]);
   app.innerHTML = '';
@@ -959,7 +982,7 @@ function renderJobCard(worker,date,job,prog,refreshStats){
         <div class="pay-input-wrap"><span class="pfx">£</span><input type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${p.payment || ''}" class="pay-input"></div>
       </div>
       <div class="pay-field">
-        <label>Balance</label>
+        <label>Today's balance</label>
         <div class="balance-value"></div>
       </div>
     </div>
@@ -972,12 +995,14 @@ function renderJobCard(worker,date,job,prog,refreshStats){
 
   const priceInput = card.querySelector('.price-input');
   const payInput = card.querySelector('.pay-input');
+  let currentStatus = p.status;
 
   function currentPrice(){ return parseFloat(priceInput.value) || 0; }
 
   function updateOwedAfter(){
     const payment = parseFloat(payInput.value) || 0;
-    const owedAfter = debt + currentPrice() - payment;
+    const chargeToday = (currentStatus==='skipped' || currentStatus==='cancelled') ? 0 : currentPrice();
+    const owedAfter = debt + chargeToday - payment;
     const el = card.querySelector('.balance-value');
     if(owedAfter > 0.004) el.innerHTML = `<b style="color:var(--red)">Owes ${money(owedAfter)}</b>`;
     else if(owedAfter < -0.004) el.innerHTML = `<b style="color:var(--green)">Credit ${money(-owedAfter)}</b>`;
@@ -1000,6 +1025,7 @@ function renderJobCard(worker,date,job,prog,refreshStats){
         newStatus = current.status === action ? 'todo' : action;
         current.status = newStatus;
       });
+      currentStatus = newStatus;
       card.className = `card job-card status-${newStatus}`;
       card.querySelectorAll('.status-btn').forEach(b=>b.classList.remove('active-done','active-skipped','active-cancelled'));
       if(newStatus !== 'todo') btn.classList.add(`active-${newStatus}`);
@@ -1007,6 +1033,7 @@ function renderJobCard(worker,date,job,prog,refreshStats){
         const wipe = card.querySelector('.wipe');
         wipe.classList.add('play');
       }
+      updateOwedAfter();
       if(refreshStats) refreshStats();
       scheduleReflow(job.id, worker, date);
     };
@@ -1102,7 +1129,7 @@ async function renderDaySummary(){
     if(p.status==='skipped') skippedN++;
     if(p.status==='cancelled') cancelledN++;
     const debt = -j.balance;
-    const owedAfter = debt + price - payment;
+    const owedAfter = debt + chargeForStatus(price,p.status) - payment;
     if(p.status !== 'cancelled') outstanding += owedAfter;
     return {job:j,status:p.status,payment,price,note:p.note||'',owedAfter};
   });
@@ -1357,11 +1384,12 @@ async function renderAdminUpload(main){
     listEl.querySelectorAll('.clear-round-btn').forEach(btn=>{
       btn.onclick = async ()=>{
         const w = btn.dataset.worker, d = btn.dataset.date;
-        if(!confirm(`Clear ${w}'s job list for ${d}? This removes all their jobs and progress for that day.`)) return;
+        if(!confirm(`Clear ${w}'s job list for ${d}? Their report for that day is kept — this only resets their working list.`)) return;
         btn.disabled = true;
+        await archiveBeforeClear(w, d);
         await saveJobs(w, d, []);
         await saveProgress(w, d, {});
-        toast(`Cleared ${w}'s job list`);
+        toast(`Cleared ${w}'s job list — that day's report is still available`);
         refreshLoadedRounds();
       };
     });
@@ -1426,9 +1454,8 @@ function renderAdminReport(main){
 
     if(worker === 'ALL'){
       const results = await Promise.all(WORKERS.map(async w=>{
-        const jobs = await loadJobs(w,date);
-        const prog = jobs ? await loadProgress(w,date) : {};
-        return { w, jobs: jobs || [], prog };
+        const { jobs, prog } = await loadForReport(w,date);
+        return { w, jobs: jobs || [], prog: prog || {} };
       }));
       let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0, totalJobs=0;
       const allRows = [];
@@ -1443,7 +1470,7 @@ function renderAdminReport(main){
           if(p.status==='skipped') skippedN++;
           if(p.status==='cancelled') cancelledN++;
           const debt = -j.balance;
-          const owedAfter = debt + price - payment;
+          const owedAfter = debt + chargeForStatus(price,p.status) - payment;
           if(p.status !== 'cancelled') outstanding += owedAfter;
           allRows.push({worker:w,job:j,status:p.status,payment,price,note:p.note||'',owedAfter});
         });
@@ -1481,9 +1508,9 @@ function renderAdminReport(main){
       return;
     }
 
-    const jobs = await loadJobs(worker,date);
-    if(!jobs){ out.innerHTML = `<p class="muted">No job list loaded for ${worker} on ${date}.</p>`; return; }
-    const prog = await loadProgress(worker,date);
+    const { jobs, prog: progRaw } = await loadForReport(worker,date);
+    if(!jobs || !jobs.length){ out.innerHTML = `<p class="muted">No job list loaded for ${worker} on ${date}.</p>`; return; }
+    const prog = progRaw || {};
     let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0;
     const rows = jobs.slice().sort((a,b)=>a.order-b.order).map(j=>{
       const p = prog[j.id] || {status:'todo',payment:0};
@@ -1494,7 +1521,7 @@ function renderAdminReport(main){
       if(p.status==='skipped') skippedN++;
       if(p.status==='cancelled') cancelledN++;
       const debt = -j.balance;
-      const owedAfter = debt + price - payment;
+      const owedAfter = debt + chargeForStatus(price,p.status) - payment;
       if(p.status !== 'cancelled') outstanding += owedAfter;
       return {job:j,status:p.status,payment,price,note:p.note||'',owedAfter};
     });
