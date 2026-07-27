@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Workeriser</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#eef2f4;
+    --surface:#ffffff;
+    --ink:#10202f;
+    --ink-soft:#516b7a;
+    --navy:#123a5e;
+    --navy-deep:#0a2540;
+    --amber:#f0a202;
+    --amber-deep:#c98600;
+    --green:#1f8a54;
+    --green-bg:#e5f4ec;
+    --red:#c23b3b;
+    --red-bg:#fbe9e9;
+    --slate:#8fa1ac;
+    --slate-bg:#eef1f2;
+    --line:#dbe3e7;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:'Inter',system-ui,sans-serif;
+    min-height:100vh;
+    -webkit-tap-highlight-color:transparent;
+  }
+  h1,h2,h3,.display{font-family:'Space Grotesk',system-ui,sans-serif;}
+  button{font-family:inherit;}
+  #app{max-width:560px;margin:0 auto;min-height:100vh;background:var(--bg);display:flex;flex-direction:column;}
+
+  /* ---------- header ---------- */
+  .topbar{
+    background:linear-gradient(160deg,var(--navy-deep),var(--navy));
+    color:#fff;
+    padding:18px 20px 16px;
+    position:sticky;top:0;z-index:20;
+  }
+  .topbar-row{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+  .brand{display:flex;align-items:center;gap:10px;}
+  .brand-mark{
+    width:34px;height:34px;border-radius:9px;
+    background:var(--amber);
+    display:flex;align-items:center;justify-content:center;
+    font-family:'Space Grotesk';font-weight:700;color:var(--navy-deep);font-size:15px;
+    flex:none;
+  }
+  .brand-text .t1{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#b9cbd8;font-weight:600;}
+  .brand-text .t2{font-size:18px;font-weight:700;line-height:1.1;}
+  .topbar-btn{
+    background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.18);color:#fff;
+    padding:7px 12px;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;
+  }
+  .topbar-btn:active{background:rgba(255,255,255,.22);}
+  .topbar-sub{margin-top:12px;display:flex;justify-content:space-between;align-items:baseline;color:#cfdce5;font-size:13px;}
+  .topbar-sub b{color:#fff;font-weight:700;}
+
+  /* ---------- generic ---------- */
+  .main{flex:1;padding:18px 16px 100px;}
+  .card{background:var(--surface);border-radius:var(--radius);box-shadow:0 1px 2px rgba(10,37,64,.06), 0 6px 18px rgba(10,37,64,.05);}
+  .center-screen{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 24px;text-align:center;}
+  .muted{color:var(--ink-soft);}
+  .stack{display:flex;flex-direction:column;gap:12px;}
+
+  /* ---------- login screen ---------- */
+  .login-wrap{flex:1;display:flex;flex-direction:column;justify-content:center;padding:32px 24px;}
+  .login-hero{text-align:center;margin-bottom:34px;}
+  .login-hero .glyph{
+    width:64px;height:64px;border-radius:16px;margin:0 auto 16px;
+    background:linear-gradient(160deg,var(--navy),var(--navy-deep));
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 8px 20px rgba(10,37,64,.25);
+  }
+  .login-hero h1{font-size:24px;margin:0 0 6px;color:var(--navy-deep);}
+  .login-hero p{margin:0;color:var(--ink-soft);font-size:14px;}
+  .worker-btn{
+    display:flex;align-items:center;gap:14px;
+    background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+    padding:16px 18px;cursor:pointer;text-align:left;width:100%;
+    box-shadow:0 1px 2px rgba(10,37,64,.05);
+  }
+  .worker-btn:active{background:#f4f7f8;}
+  .worker-avatar{
+    width:42px;height:42px;border-radius:50%;flex:none;
+    background:var(--amber);color:var(--navy-deep);
+    display:flex;align-items:center;justify-content:center;font-weight:700;font-family:'Space Grotesk';font-size:16px;
+  }
+  .worker-btn .name{font-weight:700;font-size:16px;}
+  .worker-btn .sub{font-size:12.5px;color:var(--ink-soft);margin-top:1px;}
+  .worker-btn .chev{margin-left:auto;color:var(--slate);}
+  .admin-link{
+    margin-top:26px;text-align:center;font-size:13px;color:var(--ink-soft);
+    text-decoration:underline;cursor:pointer;
+  }
+
+  /* ---------- job list ---------- */
+  .round-label{
+    font-family:'Space Grotesk';font-size:12.5px;font-weight:700;letter-spacing:.04em;
+    color:var(--navy);text-transform:uppercase;margin:22px 0 8px 2px;
+    display:flex;align-items:center;gap:8px;
+  }
+  .round-label:first-child{margin-top:2px;}
+  .round-label::after{content:"";flex:1;height:1px;background:var(--line);}
+
+  .job-card{
+    padding:14px 14px 12px;margin-bottom:10px;position:relative;overflow:hidden;
+    border:1px solid var(--line);
+  }
+  .job-card.status-done{border-color:#bfe3cd;background:var(--green-bg);}
+  .job-card.status-skipped{border-color:#e6dab8;background:#fbf3e0;}
+  .job-card.status-cancelled{border-color:#f0c9c9;background:var(--red-bg);opacity:.75;}
+
+  .job-top{display:flex;justify-content:space-between;gap:10px;}
+  .job-info .cust{font-weight:700;font-size:15.5px;line-height:1.25;}
+  .addr-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:2px;}
+  .job-info .addr{font-size:13px;color:var(--ink-soft);}
+  .nav-btn{
+    display:inline-flex;align-items:center;gap:4px;flex:none;
+    background:var(--navy);color:#fff;text-decoration:none;
+    font-size:11px;font-weight:700;padding:3px 8px 3px 7px;border-radius:20px;
+    white-space:nowrap;
+  }
+  .nav-btn:active{background:var(--navy-deep);}
+  .job-info .notes{font-size:12.5px;color:var(--amber-deep);margin-top:4px;font-weight:600;}
+  .job-card.status-cancelled .cust,.job-card.status-cancelled .addr{text-decoration:line-through;}
+
+  .price-block{text-align:right;flex:none;}
+  .price-block .full{font-family:'Space Grotesk';font-weight:700;font-size:19px;color:var(--navy-deep);}
+  .price-block .front{
+    display:inline-block;margin-top:3px;font-size:11px;font-weight:700;
+    background:var(--navy);color:#fff;border-radius:6px;padding:2px 6px;
+  }
+
+  .job-meta{display:flex;gap:14px;margin-top:10px;font-size:12.5px;color:var(--ink-soft);flex-wrap:wrap;}
+  .job-meta span b{color:var(--ink);}
+  .balance-owe b{color:var(--red);}
+  .balance-credit b{color:var(--green);}
+
+  .job-controls{display:flex;gap:8px;margin-top:12px;}
+  .status-btn{
+    flex:1;padding:9px 4px;border-radius:9px;border:1.5px solid var(--line);
+    background:#fff;font-size:12.5px;font-weight:700;cursor:pointer;color:var(--ink-soft);
+    display:flex;flex-direction:column;align-items:center;gap:2px;
+  }
+  .status-btn .ic{font-size:15px;}
+  .status-btn.active-done{background:var(--green);border-color:var(--green);color:#fff;}
+  .status-btn.active-skipped{background:var(--amber);border-color:var(--amber);color:#3a2a00;}
+  .status-btn.active-cancelled{background:var(--red);border-color:var(--red);color:#fff;}
+
+  .pay-row{display:flex;align-items:center;gap:8px;margin-top:10px;}
+  .pay-row label{font-size:12.5px;color:var(--ink-soft);font-weight:600;flex:none;}
+  .pay-row .pfx{color:var(--ink-soft);}
+  .pay-row input{
+    width:100%;border:1.5px solid var(--line);border-radius:9px;padding:8px 8px 8px 4px;
+    font-size:15px;font-weight:600;font-family:'Inter';background:#fbfcfd;
+  }
+  .pay-row input:focus{outline:2px solid var(--navy);border-color:var(--navy);}
+  .owed-after{margin-top:8px;font-size:12.5px;font-weight:600;color:var(--ink-soft);}
+  .owed-after b{color:var(--ink);}
+
+  /* squeegee wipe */
+  .wipe{
+    position:absolute;inset:0;pointer-events:none;
+    background:linear-gradient(100deg,transparent 0%,rgba(255,255,255,.85) 45%,rgba(255,255,255,0) 60%);
+    transform:translateX(-120%);
+  }
+  .wipe.play{animation:squeegee .55s ease-out;}
+  @keyframes squeegee{ to{transform:translateX(120%);} }
+  @media (prefers-reduced-motion: reduce){ .wipe.play{animation:none;} }
+
+  /* ---------- summary bar / footer ---------- */
+  .summary-bar{
+    position:sticky;bottom:0;left:0;right:0;
+    background:rgba(255,255,255,.92);backdrop-filter:blur(6px);
+    border-top:1px solid var(--line);
+    padding:10px 16px;display:flex;gap:10px;
+  }
+  .sum-pill{
+    flex:1;text-align:center;padding:6px 4px;border-radius:9px;background:var(--slate-bg);
+  }
+  .sum-pill .n{font-family:'Space Grotesk';font-weight:700;font-size:16px;color:var(--navy-deep);}
+  .sum-pill .l{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);}
+  .finish-btn{
+    flex:none;background:var(--amber);color:var(--navy-deep);border:none;border-radius:9px;
+    font-weight:700;font-size:13px;padding:0 16px;cursor:pointer;
+  }
+
+  /* ---------- forms / admin ---------- */
+  .field{display:flex;flex-direction:column;gap:6px;}
+  .field label{font-size:13px;font-weight:600;color:var(--ink-soft);}
+  .field input,.field select{
+    border:1.5px solid var(--line);border-radius:10px;padding:11px 12px;font-size:15px;font-family:inherit;background:#fff;
+  }
+  .field input:focus,.field select:focus{outline:2px solid var(--navy);border-color:var(--navy);}
+  .btn{
+    border:none;border-radius:10px;padding:12px 16px;font-weight:700;font-size:14.5px;cursor:pointer;
+  }
+  .btn-primary{background:var(--navy);color:#fff;}
+  .btn-primary:active{background:var(--navy-deep);}
+  .btn-amber{background:var(--amber);color:var(--navy-deep);}
+  .btn-ghost{background:transparent;color:var(--navy);border:1.5px solid var(--line);}
+  .btn-block{width:100%;}
+  .tab-row{display:flex;gap:6px;margin-bottom:16px;background:var(--slate-bg);padding:4px;border-radius:11px;}
+  .tab-btn{flex:1;border:none;background:transparent;padding:9px 4px;border-radius:8px;font-weight:700;font-size:12.5px;color:var(--ink-soft);cursor:pointer;}
+  .tab-btn.active{background:#fff;color:var(--navy-deep);box-shadow:0 1px 3px rgba(10,37,64,.12);}
+  .section-title{font-family:'Space Grotesk';font-weight:700;font-size:15px;margin:0 0 10px;color:var(--navy-deep);}
+  .pad{padding:16px;}
+  .note-box{background:var(--slate-bg);border-radius:10px;padding:12px 14px;font-size:12.5px;color:var(--ink-soft);line-height:1.5;}
+
+  table.report{width:100%;border-collapse:collapse;font-size:12.5px;}
+  table.report th,table.report td{padding:7px 6px;text-align:left;border-bottom:1px solid var(--line);}
+  table.report th{font-size:10.5px;text-transform:uppercase;color:var(--ink-soft);letter-spacing:.03em;}
+  table.report td.num{text-align:right;font-weight:600;}
+  .badge{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;font-weight:700;}
+  .badge-done{background:var(--green-bg);color:var(--green);}
+  .badge-skipped{background:#fbf3e0;color:var(--amber-deep);}
+  .badge-cancelled{background:var(--red-bg);color:var(--red);}
+  .badge-todo{background:var(--slate-bg);color:var(--ink-soft);}
+
+  .toast{
+    position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
+    background:var(--navy-deep);color:#fff;padding:11px 18px;border-radius:10px;font-size:13.5px;font-weight:600;
+    box-shadow:0 8px 20px rgba(10,37,64,.3);z-index:100;opacity:0;transition:opacity .2s;pointer-events:none;
+    max-width:90%;text-align:center;
+  }
+  .toast.show{opacity:1;}
+  .back-row{display:flex;align-items:center;gap:8px;margin-bottom:14px;}
+  .back-row .back{cursor:pointer;color:var(--navy);font-weight:700;font-size:13px;}
+  .empty-state{padding:40px 20px;text-align:center;color:var(--ink-soft);}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+/* ================= CONFIG / STORAGE ================= */
+const WORKERS = ['Jim','Vlado','Shane'];
+const LS = {
+  jobs: (w,d)=>`wjt_jobs_${w}_${d}`,
+  progress: (w,d)=>`wjt_progress_${w}_${d}`,
+  pw: 'wjt_admin_pw',
+  lastDate: (w)=>`wjt_lastdate_${w}`
+};
+function todayStr(){
+  const d = new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function getPassword(){ return localStorage.getItem(LS.pw) || null; }
+function setPassword(p){ localStorage.setItem(LS.pw, p); }
+
+function loadJobs(worker,date){
+  const raw = localStorage.getItem(LS.jobs(worker,date));
+  return raw ? JSON.parse(raw) : null;
+}
+function saveJobs(worker,date,jobs){
+  localStorage.setItem(LS.jobs(worker,date), JSON.stringify(jobs));
+  localStorage.setItem(LS.lastDate(worker), date);
+}
+function loadProgress(worker,date){
+  const raw = localStorage.getItem(LS.progress(worker,date));
+  return raw ? JSON.parse(raw) : {};
+}
+function saveProgress(worker,date,prog){
+  localStorage.setItem(LS.progress(worker,date), JSON.stringify(prog));
+}
+function findAnyDateForWorker(worker){
+  // look for most recent stored job list for this worker
+  const last = localStorage.getItem(LS.lastDate(worker));
+  if(last && loadJobs(worker,last)) return last;
+  // fallback: scan localStorage keys
+  let found = null;
+  for(let i=0;i<localStorage.length;i++){
+    const k = localStorage.key(i);
+    if(k.startsWith(`wjt_jobs_${worker}_`)){
+      const d = k.replace(`wjt_jobs_${worker}_`,'');
+      if(!found || d > found) found = d;
+    }
+  }
+  return found;
+}
+
+/* ================= CSV PARSING ================= */
+function parseCSV(text){
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for(let i=0;i<text.length;i++){
+    const c = text[i];
+    if(inQuotes){
+      if(c === '"'){
+        if(text[i+1] === '"'){ field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else {
+      if(c === '"') inQuotes = true;
+      else if(c === ','){ row.push(field); field=''; }
+      else if(c === '\n'){ row.push(field); rows.push(row); row=[]; field=''; }
+      else if(c === '\r'){ /* skip */ }
+      else field += c;
+    }
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  if(!rows.length) return [];
+  const headers = rows[0].map(h=>h.trim());
+  return rows.slice(1).filter(r=>r.length>1 || r[0] !== '').map(r=>{
+    const obj = {};
+    headers.forEach((h,idx)=>{ obj[h] = (r[idx] !== undefined ? r[idx] : '').trim(); });
+    return obj;
+  });
+}
+
+function pick(row, candidates){
+  for(const c of candidates){
+    if(row[c] !== undefined && String(row[c]).trim() !== '') return row[c];
+  }
+  return '';
+}
+
+function rowsToJobs(rows){
+  return rows.map((r,idx)=>{
+    const price = parseFloat(pick(r,['Price'])) || 0;
+    const balance = parseFloat(pick(r,['Balance'])) || 0;
+    const frontPrice = Math.round((price/2 + 1) * 100) / 100;
+    const lat = parseFloat(pick(r,['Job Latitude','Customer Latitude']));
+    const lon = parseFloat(pick(r,['Job Longitude','Customer Longitude']));
+    const address = pick(r,['Job Address','Customer Address','Address']);
+    const postcode = pick(r,['Job Postcode','Customer Postcode']);
+    return {
+      id: pick(r,['Aworka Job ID','Aworka ID','Job Ref']) || ('row'+idx),
+      order: idx,
+      customer: (pick(r,['Customer Name','Customer']) || '').trim() || '(no name on file)',
+      address: address,
+      postcode: postcode,
+      lat: isFinite(lat) ? lat : null,
+      lon: isFinite(lon) ? lon : null,
+      round: pick(r,['Round']) || '',
+      price: price,
+      frontPrice: frontPrice,
+      balance: balance,
+      notes: pick(r,['Job Day Notes','Notes','Description','Job Notes']),
+      timeRequired: pick(r,['Time Required']),
+      frequency: pick(r,['Frequency'])
+    };
+  });
+}
+
+function navUrl(job){
+  if(job.lat != null && job.lon != null){
+    return `https://www.google.com/maps/dir/?api=1&destination=${job.lat},${job.lon}`;
+  }
+  const q = [job.address, job.postcode].filter(Boolean).join(', ');
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(q)}`;
+}
+
+/* ---- coordinate reference lookup (address -> lat/lon), updated occasionally ---- */
+const COORD_LS = 'wjt_coord_lookup';
+function loadCoordLookup(){
+  const raw = localStorage.getItem(COORD_LS);
+  return raw ? JSON.parse(raw) : { updatedAt:null, addresses:{} };
+}
+function saveCoordLookup(lookup){ localStorage.setItem(COORD_LS, JSON.stringify(lookup)); }
+
+function normAddr(a){
+  return (a||'').toLowerCase().replace(/[^a-z0-9, ]/g,'').replace(/\s+/g,' ').trim();
+}
+
+function buildCoordAddresses(rows){
+  const addresses = {};
+  rows.forEach(r=>{
+    const addr = pick(r,['Job Address','Customer Address','Address']);
+    const lat = parseFloat(pick(r,['Job Latitude','Customer Latitude']));
+    const lon = parseFloat(pick(r,['Job Longitude','Customer Longitude']));
+    const n = normAddr(addr);
+    if(n && isFinite(lat) && isFinite(lon)){
+      addresses[n] = { lat, lon, raw: addr };
+    }
+  });
+  return addresses;
+}
+
+function findCoordsForAddress(address, lookup){
+  const n = normAddr(address);
+  if(!n) return null;
+  if(lookup.addresses[n]) return lookup.addresses[n];
+  let best = null, bestLen = 0;
+  for(const key in lookup.addresses){
+    if((key.includes(n) || n.includes(key)) && key.length > bestLen){
+      best = lookup.addresses[key];
+      bestLen = key.length;
+    }
+  }
+  return best;
+}
+
+// fills in missing coordinates on a set of jobs from the stored lookup; returns list of addresses still missing
+function resolveCoordinates(jobs){
+  const lookup = loadCoordLookup();
+  const missing = [];
+  jobs.forEach(job=>{
+    if(job.lat == null || job.lon == null){
+      const found = findCoordsForAddress(job.address, lookup);
+      if(found){ job.lat = found.lat; job.lon = found.lon; }
+    }
+    if(job.lat == null || job.lon == null){
+      missing.push(job.address || job.customer);
+    }
+  });
+  return missing;
+}
+
+// after a fresh coordinate reference is uploaded, retroactively fill in any already-loaded rounds
+function rescanAllRoundsForCoords(){
+  const lookup = loadCoordLookup();
+  let fixed = 0, stillMissing = 0;
+  for(let i=0;i<localStorage.length;i++){
+    const k = localStorage.key(i);
+    if(!k || !k.startsWith('wjt_jobs_')) continue;
+    const jobs = JSON.parse(localStorage.getItem(k));
+    let changed = false;
+    jobs.forEach(job=>{
+      if(job.lat == null || job.lon == null){
+        const found = findCoordsForAddress(job.address, lookup);
+        if(found){ job.lat = found.lat; job.lon = found.lon; changed = true; fixed++; }
+        else stillMissing++;
+      }
+    });
+    if(changed) localStorage.setItem(k, JSON.stringify(jobs));
+  }
+  return { fixed, stillMissing };
+}
+
+/* ================= APP STATE ================= */
+let state = { screen:'login' };
+const app = document.getElementById('app');
+
+function go(screen, extra){ state = Object.assign({screen}, extra); render(); }
+
+function toast(msg){
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  requestAnimationFrame(()=>t.classList.add('show'));
+  setTimeout(()=>{ t.classList.remove('show'); setTimeout(()=>t.remove(),250); }, 1900);
+}
+
+function money(n){
+  const v = Math.round((n + Number.EPSILON)*100)/100;
+  const sign = v < 0 ? '-' : '';
+  return sign + '£' + Math.abs(v).toFixed(2);
+}
+
+/* ================= RENDER ROUTER ================= */
+function render(){
+  app.innerHTML = '';
+  if(state.screen==='login') renderLogin();
+  else if(state.screen==='worker') renderWorker();
+  else if(state.screen==='daySummary') renderDaySummary();
+  else if(state.screen==='adminLogin') renderAdminLogin();
+  else if(state.screen==='admin') renderAdmin();
+}
+
+/* ================= LOGIN ================= */
+function renderLogin(){
+  const wrap = document.createElement('div');
+  wrap.className = 'login-wrap';
+  wrap.innerHTML = `
+    <div class="login-hero">
+      <div class="glyph">
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><path d="M4 4h11l5 5v11H4V4z" stroke="#f0a202" stroke-width="1.6" stroke-linejoin="round"/><path d="M15 4v5h5" stroke="#f0a202" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 13.5l2.2 2.2L16 10" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <h1>Workeriser</h1>
+      <p>Pick your name to see today's jobs</p>
+    </div>
+    <div class="stack" id="workerList"></div>
+    <div class="admin-link" id="adminLink">Office / Admin</div>
+  `;
+  app.appendChild(wrap);
+  const list = wrap.querySelector('#workerList');
+  WORKERS.forEach(w=>{
+    const b = document.createElement('button');
+    b.className = 'worker-btn';
+    const date = findAnyDateForWorker(w);
+    const jobs = date ? loadJobs(w,date) : null;
+    const sub = jobs ? `${jobs.length} job${jobs.length===1?'':'s'} loaded · ${date}` : 'No round loaded yet';
+    b.innerHTML = `<div class="worker-avatar">${w[0]}</div>
+      <div><div class="name">${w}</div><div class="sub">${sub}</div></div>
+      <div class="chev">›</div>`;
+    b.onclick = ()=> go('worker', { worker:w });
+    list.appendChild(b);
+  });
+  wrap.querySelector('#adminLink').onclick = ()=> go(getPassword() ? 'adminLogin' : 'admin', {setupMode: !getPassword()});
+}
+
+/* ================= WORKER JOB LIST ================= */
+function renderWorker(){
+  const worker = state.worker;
+  const date = state.date || findAnyDateForWorker(worker) || todayStr();
+  state.date = date;
+  const jobs = loadJobs(worker,date);
+  const prog = loadProgress(worker,date);
+
+  const header = document.createElement('div');
+  header.className = 'topbar';
+  const doneCount = jobs ? jobs.filter(j=>prog[j.id] && prog[j.id].status==='done').length : 0;
+  const collected = jobs ? jobs.reduce((s,j)=> s + (prog[j.id]?.payment ? parseFloat(prog[j.id].payment)||0 : 0), 0) : 0;
+  header.innerHTML = `
+    <div class="topbar-row">
+      <div class="brand">
+        <div class="brand-mark">${worker[0]}</div>
+        <div class="brand-text"><div class="t1">Round · ${date}</div><div class="t2">${worker}</div></div>
+      </div>
+      <button class="topbar-btn" id="switchBtn">Switch</button>
+    </div>
+    ${jobs ? `<div class="topbar-sub"><span>${doneCount}/${jobs.length} done</span><span>Collected <b>${money(collected)}</b></span></div>` : ''}
+  `;
+  app.appendChild(header);
+  header.querySelector('#switchBtn').onclick = ()=> go('login');
+
+  const main = document.createElement('div');
+  main.className = 'main';
+  app.appendChild(main);
+
+  if(!jobs || !jobs.length){
+    main.innerHTML = `<div class="empty-state">No round has been loaded for ${worker} yet.<br>Ask the office to upload today's job list.</div>`;
+    return;
+  }
+
+  let lastRound = null;
+  jobs.slice().sort((a,b)=>a.order-b.order).forEach(job=>{
+    if(job.round && job.round !== lastRound){
+      const rl = document.createElement('div');
+      rl.className = 'round-label';
+      rl.textContent = job.round;
+      main.appendChild(rl);
+      lastRound = job.round;
+    }
+    main.appendChild(renderJobCard(worker,date,job,prog));
+  });
+
+  // footer summary / finish
+  const bar = document.createElement('div');
+  bar.className = 'summary-bar';
+  const remaining = jobs.length - doneCount - jobs.filter(j=>prog[j.id] && (prog[j.id].status==='skipped'||prog[j.id].status==='cancelled')).length;
+  bar.innerHTML = `
+    <div class="sum-pill"><div class="n">${remaining}</div><div class="l">Left</div></div>
+    <div class="sum-pill"><div class="n">${money(collected)}</div><div class="l">Collected</div></div>
+    <button class="finish-btn" id="finishBtn">Day summary</button>
+  `;
+  app.appendChild(bar);
+  bar.querySelector('#finishBtn').onclick = ()=> go('daySummary',{worker,date});
+}
+
+function renderJobCard(worker,date,job,prog){
+  const p = prog[job.id] || { status:'todo', payment:'' };
+  const card = document.createElement('div');
+  card.className = `card job-card status-${p.status}`;
+
+  const debt = -job.balance; // positive = customer owes
+  const balanceClass = debt > 0 ? 'balance-owe' : (debt < 0 ? 'balance-credit' : '');
+  const balanceLabel = debt > 0 ? `Owes ${money(debt)}` : (debt < 0 ? `Credit ${money(-debt)}` : 'Balance £0');
+
+  card.innerHTML = `
+    <div class="wipe"></div>
+    <div class="job-top">
+      <div class="job-info">
+        <div class="cust">${escapeHtml(job.customer)}</div>
+        <div class="addr-row">
+          <div class="addr">${escapeHtml(job.address)}</div>
+          <a class="nav-btn" href="${navUrl(job)}" target="_blank" rel="noopener">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M3 11l17-8-8 17-2-7-7-2z" fill="currentColor"/></svg>
+            Navigate
+          </a>
+        </div>
+        ${job.notes ? `<div class="notes">⚠ ${escapeHtml(job.notes)}</div>` : ''}
+      </div>
+      <div class="price-block">
+        <div class="full">${money(job.price)}</div>
+        <div class="front">Front ${money(job.frontPrice)}</div>
+      </div>
+    </div>
+    <div class="job-meta">
+      <span class="${balanceClass}">${balanceClass ? `<b>${balanceLabel}</b>` : balanceLabel}</span>
+      ${job.timeRequired ? `<span>~${job.timeRequired}</span>` : ''}
+    </div>
+    <div class="job-controls">
+      <button class="status-btn ${p.status==='done'?'active-done':''}" data-action="done"><span class="ic">✓</span>Done</button>
+      <button class="status-btn ${p.status==='skipped'?'active-skipped':''}" data-action="skipped"><span class="ic">↷</span>Skipped</button>
+      <button class="status-btn ${p.status==='cancelled'?'active-cancelled':''}" data-action="cancelled"><span class="ic">✕</span>Cancelled</button>
+    </div>
+    <div class="pay-row">
+      <label>Cash taken</label>
+      <span class="pfx">£</span>
+      <input type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${p.payment || ''}">
+    </div>
+    <div class="owed-after"></div>
+  `;
+
+  function updateOwedAfter(){
+    const payment = parseFloat(card.querySelector('.pay-row input').value) || 0;
+    const owedAfter = debt + job.price - payment;
+    const el = card.querySelector('.owed-after');
+    if(owedAfter > 0.004) el.innerHTML = `Owed after this clean: <b style="color:var(--red)">${money(owedAfter)}</b>`;
+    else if(owedAfter < -0.004) el.innerHTML = `In credit after this clean: <b style="color:var(--green)">${money(-owedAfter)}</b>`;
+    else el.innerHTML = `<b style="color:var(--green)">Settled</b> after this clean`;
+  }
+  updateOwedAfter();
+
+  card.querySelectorAll('.status-btn').forEach(btn=>{
+    btn.onclick = ()=>{
+      const action = btn.dataset.action;
+      const prog2 = loadProgress(worker,date);
+      const current = prog2[job.id] || {status:'todo',payment:''};
+      current.status = current.status === action ? 'todo' : action;
+      prog2[job.id] = current;
+      saveProgress(worker,date,prog2);
+      if(action==='done' && current.status==='done'){
+        card.classList.add('status-done');
+        const wipe = card.querySelector('.wipe');
+        wipe.classList.add('play');
+      }
+      render();
+    };
+  });
+
+  const input = card.querySelector('.pay-row input');
+  input.addEventListener('input', ()=>{
+    updateOwedAfter();
+    const prog2 = loadProgress(worker,date);
+    const current = prog2[job.id] || {status:'todo',payment:''};
+    current.payment = input.value;
+    prog2[job.id] = current;
+    saveProgress(worker,date,prog2);
+  });
+
+  return card;
+}
+
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
+}
+
+/* ================= DAY SUMMARY (worker-facing) ================= */
+function renderDaySummary(){
+  const {worker,date} = state;
+  const jobs = loadJobs(worker,date) || [];
+  const prog = loadProgress(worker,date);
+
+  const header = document.createElement('div');
+  header.className = 'topbar';
+  header.innerHTML = `<div class="topbar-row">
+      <div class="brand"><div class="brand-mark">${worker[0]}</div>
+      <div class="brand-text"><div class="t1">Summary · ${date}</div><div class="t2">${worker}</div></div></div>
+      <button class="topbar-btn" id="backBtn">Back</button>
+    </div>`;
+  app.appendChild(header);
+  header.querySelector('#backBtn').onclick = ()=> go('worker',{worker,date});
+
+  const main = document.createElement('div');
+  main.className = 'main';
+  app.appendChild(main);
+
+  let collected=0, doneN=0, skippedN=0, cancelledN=0, outstanding=0;
+  const rows = jobs.slice().sort((a,b)=>a.order-b.order).map(j=>{
+    const p = prog[j.id] || {status:'todo',payment:0};
+    const payment = parseFloat(p.payment)||0;
+    collected += payment;
+    if(p.status==='done') doneN++;
+    if(p.status==='skipped') skippedN++;
+    if(p.status==='cancelled') cancelledN++;
+    const debt = -j.balance;
+    const owedAfter = debt + j.price - payment;
+    if(p.status !== 'cancelled') outstanding += owedAfter;
+    return {job:j,status:p.status,payment,owedAfter};
+  });
+
+  const card = document.createElement('div');
+  card.className = 'card pad';
+  card.innerHTML = `
+    <div class="section-title">Today's totals</div>
+    <table class="report">
+      <tr><td>Jobs done</td><td class="num">${doneN} / ${jobs.length}</td></tr>
+      <tr><td>Skipped</td><td class="num">${skippedN}</td></tr>
+      <tr><td>Cancelled</td><td class="num">${cancelledN}</td></tr>
+      <tr><td>Cash collected</td><td class="num">${money(collected)}</td></tr>
+      <tr><td>Still outstanding</td><td class="num">${money(outstanding)}</td></tr>
+    </table>
+  `;
+  main.appendChild(card);
+
+  const card2 = document.createElement('div');
+  card2.className = 'card pad';
+  card2.style.marginTop = '14px';
+  let tableRows = rows.map(r=>`
+    <tr>
+      <td>${escapeHtml(r.job.customer)}</td>
+      <td><span class="badge badge-${r.status}">${r.status}</span></td>
+      <td class="num">${money(r.payment)}</td>
+      <td class="num">${money(r.owedAfter)}</td>
+    </tr>`).join('');
+  card2.innerHTML = `
+    <div class="section-title">Job by job</div>
+    <table class="report">
+      <tr><th>Customer</th><th>Status</th><th>Paid</th><th>Owed</th></tr>
+      ${tableRows}
+    </table>
+  `;
+  main.appendChild(card2);
+
+  const btnRow = document.createElement('div');
+  btnRow.className = 'stack';
+  btnRow.style.marginTop = '16px';
+  btnRow.innerHTML = `
+    <button class="btn btn-amber btn-block" id="copyBtn">Copy report to send to office</button>
+    <button class="btn btn-ghost btn-block" id="csvBtn">Download CSV</button>
+  `;
+  main.appendChild(btnRow);
+
+  btnRow.querySelector('#copyBtn').onclick = ()=>{
+    const text = buildReportText(worker,date,rows,{collected,outstanding,doneN,skippedN,cancelledN,total:jobs.length});
+    navigator.clipboard.writeText(text).then(()=>toast('Report copied — paste into WhatsApp/text')).catch(()=>{
+      const ta = document.createElement('textarea'); ta.value=text; document.body.appendChild(ta);
+      ta.select(); document.execCommand('copy'); ta.remove();
+      toast('Report copied — paste into WhatsApp/text');
+    });
+  };
+  btnRow.querySelector('#csvBtn').onclick = ()=> downloadReportCSV(worker,date,rows);
+}
+
+function buildReportText(worker,date,rows,totals){
+  let lines = [];
+  lines.push(`${worker} — ${date}`);
+  lines.push(`Done ${totals.doneN}/${totals.total} · Skipped ${totals.skippedN} · Cancelled ${totals.cancelledN}`);
+  lines.push(`Collected: ${money(totals.collected)}   Outstanding: ${money(totals.outstanding)}`);
+  lines.push('');
+  rows.forEach(r=>{
+    lines.push(`${r.job.customer} — ${r.status}${r.payment?`, paid ${money(r.payment)}`:''}${r.owedAfter>0.004?`, owes ${money(r.owedAfter)}`:''}`);
+  });
+  return lines.join('\n');
+}
+
+function downloadReportCSV(worker,date,rows){
+  let csv = 'Customer,Address,Round,Price,FrontPrice,Status,CashTaken,OwedAfter\n';
+  rows.forEach(r=>{
+    csv += [r.job.customer,r.job.address,r.job.round,r.job.price.toFixed(2),r.job.frontPrice.toFixed(2),r.status,r.payment.toFixed(2),r.owedAfter.toFixed(2)]
+      .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',') + '\n';
+  });
+  const blob = new Blob([csv],{type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${worker}_${date}_report.csv`;
+  a.click();
+}
+
+/* ================= ADMIN LOGIN ================= */
+function renderAdminLogin(){
+  const wrap = document.createElement('div');
+  wrap.className = 'center-screen';
+  wrap.innerHTML = `
+    <div class="glyph" style="width:56px;height:56px;border-radius:14px;margin-bottom:18px;background:linear-gradient(160deg,var(--navy),var(--navy-deep));display:flex;align-items:center;justify-content:center;">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><rect x="5" y="10" width="14" height="10" rx="2" stroke="#f0a202" stroke-width="1.6"/><path d="M8 10V7a4 4 0 018 0v3" stroke="#f0a202" stroke-width="1.6"/></svg>
+    </div>
+    <h2 style="margin:0 0 6px;">Office area</h2>
+    <p class="muted" style="margin:0 0 20px;font-size:14px;">Enter the password to continue</p>
+    <div class="field" style="width:100%;max-width:280px;">
+      <input type="password" id="pwInput" placeholder="Password" autofocus>
+    </div>
+    <button class="btn btn-primary" id="pwGo" style="margin-top:14px;width:100%;max-width:280px;">Enter</button>
+    <div class="admin-link" id="backLogin" style="margin-top:22px;">Back</div>
+  `;
+  app.appendChild(wrap);
+  const input = wrap.querySelector('#pwInput');
+  wrap.querySelector('#pwGo').onclick = ()=>{
+    if(input.value === getPassword()) go('admin');
+    else { toast('Wrong password'); input.value=''; input.focus(); }
+  };
+  input.addEventListener('keydown', e=>{ if(e.key==='Enter') wrap.querySelector('#pwGo').click(); });
+  wrap.querySelector('#backLogin').onclick = ()=> go('login');
+}
+
+/* ================= ADMIN AREA ================= */
+function renderAdmin(){
+  const setupMode = !getPassword();
+  const header = document.createElement('div');
+  header.className = 'topbar';
+  header.innerHTML = `<div class="topbar-row">
+      <div class="brand"><div class="brand-mark">⚙</div>
+      <div class="brand-text"><div class="t1">Office</div><div class="t2">Admin</div></div></div>
+      <button class="topbar-btn" id="exitAdmin">Exit</button>
+    </div>`;
+  app.appendChild(header);
+  header.querySelector('#exitAdmin').onclick = ()=> go('login');
+
+  const main = document.createElement('div');
+  main.className = 'main';
+  app.appendChild(main);
+
+  if(setupMode){
+    renderAdminSetup(main);
+    return;
+  }
+
+  const tab = state.adminTab || 'upload';
+  const tabs = document.createElement('div');
+  tabs.className = 'tab-row';
+  [['upload','Upload'],['report','Reports'],['settings','Settings']].forEach(([k,label])=>{
+    const b = document.createElement('button');
+    b.className = 'tab-btn' + (tab===k?' active':'');
+    b.textContent = label;
+    b.onclick = ()=>{ state.adminTab = k; render(); };
+    tabs.appendChild(b);
+  });
+  main.appendChild(tabs);
+
+  if(tab==='upload') renderAdminUpload(main);
+  else if(tab==='report') renderAdminReport(main);
+  else renderAdminSettings(main);
+}
+
+function renderAdminSetup(main){
+  const card = document.createElement('div');
+  card.className = 'card pad';
+  card.innerHTML = `
+    <div class="section-title">Set an office password</div>
+    <p class="muted" style="font-size:13px;margin-top:-4px;">This just keeps casual browsers out — it isn't high security.</p>
+    <div class="field" style="margin-top:12px;"><label>New password</label><input type="password" id="newPw"></div>
+    <button class="btn btn-primary btn-block" id="setPwBtn" style="margin-top:14px;">Save password</button>
+  `;
+  main.appendChild(card);
+  card.querySelector('#setPwBtn').onclick = ()=>{
+    const v = card.querySelector('#newPw').value;
+    if(!v){ toast('Enter a password'); return; }
+    setPassword(v);
+    toast('Password set');
+    go('admin');
+  };
+}
+
+function renderAdminUpload(main){
+  const card = document.createElement('div');
+  card.className = 'card pad';
+  const options = WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
+  card.innerHTML = `
+    <div class="section-title">Upload a round CSV</div>
+    <div class="stack">
+      <div class="field"><label>Worker</label><select id="uWorker">${options}</select></div>
+      <div class="field"><label>Date this round is for</label><input type="date" id="uDate" value="${todayStr()}"></div>
+      <div class="field"><label>CSV file</label><input type="file" id="uFile" accept=".csv"></div>
+      <button class="btn btn-primary btn-block" id="uGo">Load round</button>
+      <div id="uStatus"></div>
+    </div>
+  `;
+  main.appendChild(card);
+
+  card.querySelector('#uGo').onclick = ()=>{
+    const worker = card.querySelector('#uWorker').value;
+    const date = card.querySelector('#uDate').value || todayStr();
+    const fileInput = card.querySelector('#uFile');
+    const file = fileInput.files[0];
+    if(!file){ toast('Choose a CSV file first'); return; }
+    const reader = new FileReader();
+    reader.onload = (e)=>{
+      try{
+        const rows = parseCSV(e.target.result);
+        const jobs = rowsToJobs(rows);
+        if(!jobs.length){ toast('No rows found in that file'); return; }
+        const missing = resolveCoordinates(jobs);
+        saveJobs(worker,date,jobs);
+        let msg = `Loaded <b>${jobs.length}</b> jobs for <b>${worker}</b> on <b>${date}</b>.`;
+        if(missing.length){
+          msg += `<br><br>⚠ ${missing.length} address${missing.length===1?'':'es'} couldn't be matched to coordinates:<br>` +
+            missing.map(m=>'• '+escapeHtml(m)).join('<br>') +
+            `<br>Upload a fresh coordinate reference file below to fix ${missing.length===1?'it':'these'}.`;
+        } else {
+          msg += ` All addresses matched to coordinates.`;
+        }
+        card.querySelector('#uStatus').innerHTML = `<div class="note-box" style="margin-top:6px;">${msg}</div>`;
+        toast(missing.length ? `Loaded ${jobs.length} jobs, ${missing.length} missing coordinates` : `Loaded ${jobs.length} jobs for ${worker}`);
+      }catch(err){
+        toast('Could not read that CSV');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const existing = document.createElement('div');
+  existing.className = 'card pad';
+  existing.style.marginTop = '14px';
+  existing.innerHTML = `<div class="section-title">Currently loaded rounds</div>`;
+  const listEl = document.createElement('div');
+  listEl.className = 'stack';
+  WORKERS.forEach(w=>{
+    const d = findAnyDateForWorker(w);
+    const jobs = d ? loadJobs(w,d) : null;
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;justify-content:space-between;font-size:13.5px;padding:8px 0;border-bottom:1px solid var(--line);';
+    row.innerHTML = `<span><b>${w}</b></span><span class="muted">${jobs ? `${jobs.length} jobs · ${d}` : 'nothing loaded'}</span>`;
+    listEl.appendChild(row);
+  });
+  existing.appendChild(listEl);
+  main.appendChild(existing);
+
+  const coordCard = document.createElement('div');
+  coordCard.className = 'card pad';
+  coordCard.style.marginTop = '14px';
+  const lookup = loadCoordLookup();
+  const addrCount = Object.keys(lookup.addresses).length;
+  coordCard.innerHTML = `
+    <div class="section-title">Coordinate reference</div>
+    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">Upload your "active / next due" export occasionally to keep GPS coordinates on file. Daily round CSVs don't carry coordinates themselves — addresses are matched against this list automatically whenever you load a round above.</p>
+    <div class="note-box" style="margin:10px 0;">${addrCount ? `${addrCount} addresses on file${lookup.updatedAt ? ` · updated ${lookup.updatedAt}` : ''}` : 'No coordinate reference uploaded yet'}</div>
+    <div class="field"><label>Active / next-due CSV</label><input type="file" id="cFile" accept=".csv"></div>
+    <button class="btn btn-ghost btn-block" id="cGo" style="margin-top:10px;">Update coordinates</button>
+    <div id="cStatus"></div>
+  `;
+  main.appendChild(coordCard);
+
+  coordCard.querySelector('#cGo').onclick = ()=>{
+    const file = coordCard.querySelector('#cFile').files[0];
+    if(!file){ toast('Choose a CSV file first'); return; }
+    const reader = new FileReader();
+    reader.onload = (e)=>{
+      try{
+        const rows = parseCSV(e.target.result);
+        const addresses = buildCoordAddresses(rows);
+        const count = Object.keys(addresses).length;
+        if(!count){ toast('No coordinates found in that file'); return; }
+        saveCoordLookup({ updatedAt: new Date().toLocaleDateString('en-GB'), addresses });
+        const { fixed, stillMissing } = rescanAllRoundsForCoords();
+        coordCard.querySelector('#cStatus').innerHTML = `<div class="note-box" style="margin-top:8px;">Saved ${count} addresses.${fixed ? ` Filled in coordinates for ${fixed} already-loaded job${fixed===1?'':'s'}.` : ''}${stillMissing ? ` ${stillMissing} job${stillMissing===1?'':'s'} still missing — check the address spelling matches.` : ''}</div>`;
+        toast('Coordinate reference updated');
+      }catch(err){ toast('Could not read that CSV'); }
+    };
+    reader.readAsText(file);
+  };
+}
+
+function renderAdminReport(main){
+  const card = document.createElement('div');
+  card.className = 'card pad';
+  const options = WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
+  card.innerHTML = `
+    <div class="section-title">View a report</div>
+    <div class="stack">
+      <div class="field"><label>Worker</label><select id="rWorker">${options}</select></div>
+      <div class="field"><label>Date</label><input type="date" id="rDate" value="${todayStr()}"></div>
+      <button class="btn btn-primary btn-block" id="rGo">Show report</button>
+    </div>
+    <div id="rOut" style="margin-top:16px;"></div>
+  `;
+  main.appendChild(card);
+
+  function showReport(){
+    const worker = card.querySelector('#rWorker').value;
+    const date = card.querySelector('#rDate').value;
+    const jobs = loadJobs(worker,date);
+    const out = card.querySelector('#rOut');
+    if(!jobs){ out.innerHTML = `<p class="muted">No round loaded for ${worker} on ${date}.</p>`; return; }
+    const prog = loadProgress(worker,date);
+    let collected=0, outstanding=0;
+    const rows = jobs.slice().sort((a,b)=>a.order-b.order).map(j=>{
+      const p = prog[j.id] || {status:'todo',payment:0};
+      const payment = parseFloat(p.payment)||0;
+      collected += payment;
+      const debt = -j.balance;
+      const owedAfter = debt + j.price - payment;
+      if(p.status !== 'cancelled') outstanding += owedAfter;
+      return {job:j,status:p.status,payment,owedAfter};
+    });
+    out.innerHTML = `
+      <table class="report">
+        <tr><th>Customer</th><th>Status</th><th>Paid</th><th>Owed</th></tr>
+        ${rows.map(r=>`<tr><td>${escapeHtml(r.job.customer)}</td><td><span class="badge badge-${r.status}">${r.status}</span></td><td class="num">${money(r.payment)}</td><td class="num">${money(r.owedAfter)}</td></tr>`).join('')}
+      </table>
+      <div class="note-box" style="margin-top:10px;">Collected ${money(collected)} · Outstanding ${money(outstanding)}</div>
+      <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
+    `;
+    out.querySelector('#rCsv').onclick = ()=> downloadReportCSV(worker,date,rows);
+  }
+  card.querySelector('#rGo').onclick = showReport;
+}
+
+function renderAdminSettings(main){
+  const card = document.createElement('div');
+  card.className = 'card pad';
+  card.innerHTML = `
+    <div class="section-title">Change office password</div>
+    <div class="stack">
+      <div class="field"><label>New password</label><input type="password" id="newPw2"></div>
+      <button class="btn btn-primary btn-block" id="changePwBtn">Update password</button>
+    </div>
+  `;
+  main.appendChild(card);
+  card.querySelector('#changePwBtn').onclick = ()=>{
+    const v = card.querySelector('#newPw2').value;
+    if(!v){ toast('Enter a password'); return; }
+    setPassword(v);
+    toast('Password updated');
+  };
+
+  const wipe = document.createElement('div');
+  wipe.className = 'card pad';
+  wipe.style.marginTop = '14px';
+  wipe.innerHTML = `
+    <div class="section-title">Storage</div>
+    <p class="muted" style="font-size:13px;margin-top:-4px;">Everything is stored only in this browser, on this device. Nothing is sent anywhere.</p>
+  `;
+  main.appendChild(wipe);
+}
+
+/* ================= INIT ================= */
+render();
+</script>
+</body>
+</html>
