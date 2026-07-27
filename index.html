@@ -753,21 +753,33 @@ function renderJobCard(worker,date,job,prog){
     };
   });
 
+  function updateFrontButton(){
+    const btn = card.querySelector('.front');
+    const atFront = Math.abs(currentPrice() - job.frontPrice) < 0.005;
+    btn.textContent = atFront ? 'Revert' : `Front ${money(job.frontPrice)}`;
+    btn.title = atFront ? 'Tap to go back to the full price' : 'Tap to charge the front price instead';
+  }
+  updateFrontButton();
+
   priceInput.addEventListener('input', ()=>{
     updateOwedAfter();
+    updateFrontButton();
     persist(current=>{ current.price = priceInput.value; });
   });
   priceInput.addEventListener('blur', ()=>{
     if(priceInput.value !== ''){
       priceInput.value = currentPrice().toFixed(2);
       updateOwedAfter();
+      updateFrontButton();
       persist(current=>{ current.price = priceInput.value; });
     }
   });
 
   card.querySelector('.front').onclick = ()=>{
-    priceInput.value = job.frontPrice.toFixed(2);
+    const atFront = Math.abs(currentPrice() - job.frontPrice) < 0.005;
+    priceInput.value = (atFront ? job.price : job.frontPrice).toFixed(2);
     updateOwedAfter();
+    updateFrontButton();
     persist(current=>{ current.price = priceInput.value; });
   };
 
