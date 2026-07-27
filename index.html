@@ -146,6 +146,9 @@
   }
   .move-target-btn:active{background:var(--amber-deep);color:#fff;}
   .move-target-btn:disabled{opacity:.6;}
+  .undo-bar{background:var(--navy);}
+  .move-dismiss-btn{background:rgba(255,255,255,.14);color:#fff;}
+  .move-dismiss-btn:active{background:rgba(255,255,255,.24);}
 
   .job-top{display:flex;justify-content:space-between;gap:10px;}
   .job-info .addr{font-weight:700;font-size:15.5px;line-height:1.3;color:var(--ink);}
@@ -171,9 +174,14 @@
   .price-edit{display:flex;align-items:center;justify-content:flex-end;gap:2px;}
   .price-edit .pfx{font-family:'Space Grotesk';font-weight:700;font-size:19px;color:var(--navy-deep);}
   .price-input{
-    width:64px;border:none;background:transparent;text-align:right;
+    width:80px;border:none;background:transparent;text-align:right;
     font-family:'Space Grotesk';font-weight:700;font-size:19px;color:var(--navy-deep);
-    padding:2px 0;border-bottom:1.5px dashed var(--line);
+    padding:2px 2px;border-bottom:1.5px dashed var(--line);
+    -moz-appearance:textfield;
+  }
+  .price-input::-webkit-outer-spin-button,
+  .price-input::-webkit-inner-spin-button{
+    -webkit-appearance:none;margin:0;
   }
   .price-input:focus{outline:none;border-bottom-color:var(--navy);}
   .price-block .front{
@@ -193,6 +201,13 @@
   .status-btn.active-done{background:var(--green);border-color:var(--green);color:#fff;}
   .status-btn.active-skipped{background:var(--amber);border-color:var(--amber);color:#3a2a00;}
   .status-btn.active-cancelled{background:var(--red);border-color:var(--red);color:#fff;}
+  .reject-btn{
+    width:100%;margin-top:8px;background:transparent;border:1.5px dashed var(--line);
+    color:var(--ink-soft);border-radius:9px;padding:7px 4px;font-size:12px;font-weight:600;
+    cursor:pointer;font-family:inherit;
+  }
+  .reject-btn:active{background:var(--slate-bg);}
+  .reject-btn:disabled{opacity:.6;}
 
   .pay-row{display:flex;gap:10px;margin-top:12px;}
   .pay-field{flex:1;}
@@ -793,11 +808,12 @@ async function renderWorker(){
     const selectedIds = new Set();
 
     function renderMoveBar(){
-      moveBarContainer.innerHTML = '';
+      const existing = moveBarContainer.querySelector('.move-bar.select-bar');
+      if(existing) existing.remove();
       if(!selectMode || selectedIds.size===0) return;
       const others = WORKERS.filter(w=>w!==worker);
       const mb = document.createElement('div');
-      mb.className = 'move-bar';
+      mb.className = 'move-bar select-bar';
       mb.innerHTML = `
         <div class="move-bar-label">${selectedIds.size} selected — send to</div>
         <div class="move-bar-targets">
@@ -812,13 +828,14 @@ async function renderWorker(){
           btn.disabled = true;
           await moveJobsToWorker(worker, target, date, ids);
           toast(`Moved ${ids.length} job${ids.length===1?'':'s'} to ${target}`);
+          state.lastMove = { from:worker, to:target, date, ids };
           render();
         };
       });
     }
 
-    selectBtn.onclick = ()=>{
-      selectMode = !selectMode;
+    function setSelectMode(on, initialIds){
+      selectMode = on;
       selectBtn.textContent = selectMode ? 'Cancel' : 'Select';
       selectedIds.clear();
       todoCardMap.forEach((card,jobId)=>{
@@ -835,14 +852,52 @@ async function renderWorker(){
             });
             card.appendChild(cb);
           }
-          cb.checked = false;
+          const shouldCheck = !!(initialIds && initialIds.includes(jobId));
+          cb.checked = shouldCheck;
+          if(shouldCheck) selectedIds.add(jobId);
         } else {
           card.classList.remove('selectable');
           if(cb) cb.remove();
         }
       });
       renderMoveBar();
-    };
+    }
+
+    selectBtn.onclick = ()=> setSelectMode(!selectMode);
+
+    // show an Undo banner for the most recent move Simon made from this list
+    if(state.lastMove && state.lastMove.from===worker && state.lastMove.date===date){
+      const { to, ids } = state.lastMove;
+      const banner = document.createElement('div');
+      banner.className = 'move-bar undo-bar';
+      banner.innerHTML = `
+        <div class="move-bar-label">Moved ${ids.length} job${ids.length===1?'':'s'} to ${escapeHtml(to)}</div>
+        <div class="move-bar-targets">
+          <button type="button" class="move-target-btn" id="undoMoveBtn">Undo</button>
+          <button type="button" class="move-target-btn move-dismiss-btn" id="dismissMoveBtn">Dismiss</button>
+        </div>
+      `;
+      moveBarContainer.appendChild(banner);
+      banner.querySelector('#undoMoveBtn').onclick = async ()=>{
+        banner.remove();
+        await moveJobsToWorker(to, worker, date, ids);
+        toast(`Brought back ${ids.length} job${ids.length===1?'':'s'}`);
+        state.pendingSelection = ids;
+        delete state.lastMove;
+        render();
+      };
+      banner.querySelector('#dismissMoveBtn').onclick = ()=>{
+        delete state.lastMove;
+        banner.remove();
+      };
+    }
+
+    // if we just undid a move, re-enter select mode with those jobs pre-checked
+    if(state.pendingSelection){
+      const ids = state.pendingSelection;
+      delete state.pendingSelection;
+      setSelectMode(true, ids);
+    }
   }
 
   refreshStats();
@@ -885,6 +940,7 @@ function renderJobCard(worker,date,job,prog,refreshStats){
       <button class="status-btn ${p.status==='skipped'?'active-skipped':''}" data-action="skipped"><span class="ic">↷</span>Skipped</button>
       <button class="status-btn ${p.status==='cancelled'?'active-cancelled':''}" data-action="cancelled"><span class="ic">✕</span>Cancelled</button>
     </div>
+    ${worker!=='Simon' && p.status==='todo' ? `<button type="button" class="reject-btn">Reject</button>` : ''}
     <div class="pay-row">
       <div class="pay-field">
         <label>Cash paid</label>
@@ -942,6 +998,17 @@ function renderJobCard(worker,date,job,prog,refreshStats){
       scheduleReflow(job.id, worker, date);
     };
   });
+
+  const rejectBtn = card.querySelector('.reject-btn');
+  if(rejectBtn){
+    rejectBtn.onclick = async ()=>{
+      rejectBtn.disabled = true;
+      rejectBtn.textContent = 'Sending…';
+      await moveJobsToWorker(worker, 'Simon', date, [job.id]);
+      toast('Sent back to Simon');
+      render();
+    };
+  }
 
   function updateFrontButton(){
     const btn = card.querySelector('.front');
@@ -1214,6 +1281,7 @@ async function renderAdminUpload(main){
         if(!jobs.length){ toast('No rows found in that file'); return; }
         const missing = await resolveCoordinates(jobs);
         await saveJobs(worker,date,jobs);
+        await refreshLoadedRounds();
         let msg = `Loaded <b>${jobs.length}</b> jobs for <b>${worker}</b> on <b>${date}</b>.`;
         if(missing.length){
           msg += `<br><br>⚠ ${missing.length} address${missing.length===1?'':'es'} couldn't be matched to coordinates:<br>` +
@@ -1238,19 +1306,38 @@ async function renderAdminUpload(main){
   existing.innerHTML = `<div class="section-title">Currently loaded rounds</div>`;
   const listEl = document.createElement('div');
   listEl.className = 'stack';
-  const rows = await Promise.all(WORKERS.map(async w=>{
-    const d = await findAnyDateForWorker(w);
-    const jobs = d ? await loadJobs(w,d) : null;
-    return { w, d, jobs };
-  }));
-  rows.forEach(({w,d,jobs})=>{
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex;justify-content:space-between;font-size:13.5px;padding:8px 0;border-bottom:1px solid var(--line);';
-    row.innerHTML = `<span><b>${w}</b></span><span class="muted">${jobs ? `${jobs.length} jobs · ${d}` : 'nothing loaded'}</span>`;
-    listEl.appendChild(row);
-  });
   existing.appendChild(listEl);
   main.appendChild(existing);
+
+  async function refreshLoadedRounds(){
+    const rows = await Promise.all(WORKERS.map(async w=>{
+      const d = await findAnyDateForWorker(w);
+      const jobs = d ? await loadJobs(w,d) : null;
+      return { w, d, jobs };
+    }));
+    listEl.innerHTML = '';
+    rows.forEach(({w,d,jobs})=>{
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;font-size:13.5px;padding:8px 0;border-bottom:1px solid var(--line);gap:10px;';
+      row.innerHTML = `<span><b>${w}</b></span>
+        <span class="muted" style="text-align:right;">${jobs && jobs.length ? `${jobs.length} jobs · ${d}` : 'nothing loaded'}</span>
+        ${jobs && jobs.length ? `<button type="button" class="clear-round-btn" data-worker="${escapeHtml(w)}" data-date="${d}" style="flex:none;background:transparent;border:1.5px solid var(--line);color:var(--red);border-radius:8px;padding:5px 9px;font-size:12px;font-weight:700;cursor:pointer;">Clear</button>` : ''}
+      `;
+      listEl.appendChild(row);
+    });
+    listEl.querySelectorAll('.clear-round-btn').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const w = btn.dataset.worker, d = btn.dataset.date;
+        if(!confirm(`Clear ${w}'s round for ${d}? This removes all their jobs and progress for that day.`)) return;
+        btn.disabled = true;
+        await saveJobs(w, d, []);
+        await saveProgress(w, d, {});
+        toast(`Cleared ${w}'s round`);
+        refreshLoadedRounds();
+      };
+    });
+  }
+  await refreshLoadedRounds();
 
   const coordCard = document.createElement('div');
   coordCard.className = 'card pad';
