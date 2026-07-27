@@ -682,7 +682,11 @@ function renderNeedsSetup(){
 
 /* ================= LOGIN ================= */
 async function renderLogin(){
-  const dates = await Promise.all(WORKERS.map(w=>findAnyDateForWorker(w)));
+  const info = await Promise.all(WORKERS.map(async w=>{
+    const date = await findAnyDateForWorker(w);
+    const jobs = date ? await loadJobs(w,date) : null;
+    return { date, hasJobs: !!(jobs && jobs.length) };
+  }));
   app.innerHTML = '';
   const wrap = document.createElement('div');
   wrap.className = 'login-wrap';
@@ -702,8 +706,8 @@ async function renderLogin(){
   WORKERS.forEach((w,i)=>{
     const b = document.createElement('button');
     b.className = 'worker-btn';
-    const date = dates[i];
-    const sub = date ? `Round loaded · ${date}` : 'No round loaded yet';
+    const { date, hasJobs } = info[i];
+    const sub = hasJobs ? `Job list loaded · ${date}` : 'No job list loaded yet';
     b.innerHTML = `<div class="worker-avatar">${w[0]}</div>
       <div><div class="name">${w}</div><div class="sub">${sub}</div></div>
       <div class="chev">›</div>`;
@@ -727,7 +731,7 @@ async function renderWorker(){
     <div class="topbar-row">
       <div class="brand">
         <div class="brand-mark">${worker[0]}</div>
-        <div class="brand-text"><div class="t1">Round · ${date}</div><div class="t2">${worker}</div></div>
+        <div class="brand-text"><div class="t1">Job list · ${date}</div><div class="t2">${worker}</div></div>
       </div>
       <button class="topbar-btn" id="switchBtn">Switch</button>
       ${worker==='Simon' ? `<button class="topbar-btn" id="selectBtn" style="margin-left:8px;">Select</button>` : ''}
@@ -745,7 +749,7 @@ async function renderWorker(){
   main.appendChild(moveBarContainer);
 
   if(!jobs || !jobs.length){
-    main.innerHTML = `<div class="empty-state">No round has been loaded for ${worker} yet.<br>Ask the office to upload today's job list.</div>`;
+    main.innerHTML = `<div class="empty-state">No job list has been loaded for ${worker} yet.<br>Ask the office to upload today's job list.</div>`;
     return;
   }
 
@@ -1258,12 +1262,12 @@ async function renderAdminUpload(main){
   card.className = 'card pad';
   const options = WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
   card.innerHTML = `
-    <div class="section-title">Upload a round CSV</div>
+    <div class="section-title">Upload a job list CSV</div>
     <div class="stack">
       <div class="field"><label>Worker</label><select id="uWorker">${options}</select></div>
-      <div class="field"><label>Date this round is for</label><input type="date" id="uDate" value="${todayStr()}"></div>
+      <div class="field"><label>Date this job list is for</label><input type="date" id="uDate" value="${todayStr()}"></div>
       <div class="field"><label>CSV file</label><input type="file" id="uFile" accept=".csv"></div>
-      <button class="btn btn-primary btn-block" id="uGo">Load round</button>
+      <button class="btn btn-primary btn-block" id="uGo">Load job list</button>
       <div id="uStatus"></div>
     </div>
   `;
@@ -1310,7 +1314,7 @@ async function renderAdminUpload(main){
   const existing = document.createElement('div');
   existing.className = 'card pad';
   existing.style.marginTop = '14px';
-  existing.innerHTML = `<div class="section-title">Currently loaded rounds</div>`;
+  existing.innerHTML = `<div class="section-title">Currently loaded job lists</div>`;
   const listEl = document.createElement('div');
   listEl.className = 'stack';
   existing.appendChild(listEl);
@@ -1335,11 +1339,11 @@ async function renderAdminUpload(main){
     listEl.querySelectorAll('.clear-round-btn').forEach(btn=>{
       btn.onclick = async ()=>{
         const w = btn.dataset.worker, d = btn.dataset.date;
-        if(!confirm(`Clear ${w}'s round for ${d}? This removes all their jobs and progress for that day.`)) return;
+        if(!confirm(`Clear ${w}'s job list for ${d}? This removes all their jobs and progress for that day.`)) return;
         btn.disabled = true;
         await saveJobs(w, d, []);
         await saveProgress(w, d, {});
-        toast(`Cleared ${w}'s round`);
+        toast(`Cleared ${w}'s job list`);
         refreshLoadedRounds();
       };
     });
@@ -1353,7 +1357,7 @@ async function renderAdminUpload(main){
   const addrCount = Object.keys(lookup.addresses).length;
   coordCard.innerHTML = `
     <div class="section-title">Coordinate reference</div>
-    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">Upload your "active, sorted by round order" export occasionally to keep GPS coordinates and round order on file. Daily round CSVs don't carry this themselves — addresses are matched against this list automatically whenever you load a round above.</p>
+    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">Upload your "active, sorted by round order" export occasionally to keep GPS coordinates and round order on file. Daily job list CSVs don't carry this themselves — addresses are matched against this list automatically whenever you load a job list above.</p>
     <div class="note-box" style="margin:10px 0;">${addrCount ? `${addrCount} addresses on file${lookup.updatedAt ? ` · updated ${lookup.updatedAt}` : ''}` : 'No coordinate reference uploaded yet'}</div>
     <div class="field"><label>active-round-order...csv</label><input type="file" id="cFile" accept=".csv"></div>
     <button class="btn btn-ghost btn-block" id="cGo" style="margin-top:10px;">Update coordinates</button>
@@ -1426,7 +1430,7 @@ function renderAdminReport(main){
           allRows.push({worker:w,job:j,status:p.status,payment,price,note:p.note||'',owedAfter});
         });
       });
-      if(!totalJobs){ out.innerHTML = `<p class="muted">No rounds loaded for ${date} yet.</p>`; return; }
+      if(!totalJobs){ out.innerHTML = `<p class="muted">No job lists loaded for ${date} yet.</p>`; return; }
       const lookup = await loadCoordLookup();
       const roundOrder = lookup.roundOrder || [];
       function roundRank(roundName){
@@ -1460,7 +1464,7 @@ function renderAdminReport(main){
     }
 
     const jobs = await loadJobs(worker,date);
-    if(!jobs){ out.innerHTML = `<p class="muted">No round loaded for ${worker} on ${date}.</p>`; return; }
+    if(!jobs){ out.innerHTML = `<p class="muted">No job list loaded for ${worker} on ${date}.</p>`; return; }
     const prog = await loadProgress(worker,date);
     let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0;
     const rows = jobs.slice().sort((a,b)=>a.order-b.order).map(j=>{
@@ -1519,7 +1523,7 @@ function renderAdminSettings(main){
   wipe.style.marginTop = '14px';
   wipe.innerHTML = `
     <div class="section-title">Storage</div>
-    <p class="muted" style="font-size:13px;margin-top:-4px;line-height:1.5;">Round data, cash taken, and job statuses are stored in a shared Firebase database, so any phone with this app open can see the same information. The office password is just a screen in this app, not real access control — anyone with the Firebase project details could still reach the data directly, so don't put anything highly sensitive in here.</p>
+    <p class="muted" style="font-size:13px;margin-top:-4px;line-height:1.5;">Job list data, cash taken, and job statuses are stored in a shared Firebase database, so any phone with this app open can see the same information. The office password is just a screen in this app, not real access control — anyone with the Firebase project details could still reach the data directly, so don't put anything highly sensitive in here.</p>
   `;
   main.appendChild(wipe);
 }
