@@ -111,6 +111,16 @@
   .round-label:first-child{margin-top:2px;}
   .round-label::after{content:"";flex:1;height:1px;background:var(--line);}
 
+  .completed-divider{
+    display:flex;align-items:center;gap:10px;
+    margin:26px 0 14px;color:var(--slate);
+  }
+  .completed-divider::before,.completed-divider::after{content:"";flex:1;height:1px;background:var(--line);}
+  .completed-divider span{
+    font-family:'Space Grotesk';font-size:11px;font-weight:700;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--ink-soft);white-space:nowrap;
+  }
+
   .job-card{
     padding:14px 14px 12px;margin-bottom:10px;position:relative;overflow:hidden;
     border:1px solid var(--line);
@@ -635,17 +645,33 @@ async function renderWorker(){
     return;
   }
 
-  let lastRound = null;
-  jobs.slice().sort((a,b)=>a.order-b.order).forEach(job=>{
-    if(job.round && job.round !== lastRound){
-      const rl = document.createElement('div');
-      rl.className = 'round-label';
-      rl.textContent = job.round;
-      main.appendChild(rl);
-      lastRound = job.round;
-    }
-    main.appendChild(renderJobCard(worker,date,job,prog));
-  });
+  const sorted = jobs.slice().sort((a,b)=>a.order-b.order);
+  const todoJobs = sorted.filter(j=> !prog[j.id] || prog[j.id].status==='todo');
+  const completedJobs = sorted.filter(j=> prog[j.id] && prog[j.id].status!=='todo');
+
+  function renderGroup(list){
+    let lastRound = null;
+    list.forEach(job=>{
+      if(job.round && job.round !== lastRound){
+        const rl = document.createElement('div');
+        rl.className = 'round-label';
+        rl.textContent = job.round;
+        main.appendChild(rl);
+        lastRound = job.round;
+      }
+      main.appendChild(renderJobCard(worker,date,job,prog));
+    });
+  }
+
+  renderGroup(todoJobs);
+
+  if(completedJobs.length){
+    const divider = document.createElement('div');
+    divider.className = 'completed-divider';
+    divider.innerHTML = `<span>Completed</span>`;
+    main.appendChild(divider);
+    renderGroup(completedJobs);
+  }
 
   // footer summary / finish
   const bar = document.createElement('div');
@@ -852,14 +878,12 @@ async function renderDaySummary(){
     <tr>
       <td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td>
       <td><span class="badge badge-${r.status}">${r.status}</span></td>
-      <td class="num">${money(r.price)}</td>
       <td class="num">${money(r.payment)}</td>
-      <td class="num">${money(r.owedAfter)}</td>
     </tr>`).join('');
   card2.innerHTML = `
     <div class="section-title">Job by job</div>
     <table class="report">
-      <tr><th>Customer</th><th>Status</th><th>Price</th><th>Paid</th><th>Owed</th></tr>
+      <tr><th>Customer</th><th>Status</th><th>Paid</th></tr>
       ${tableRows}
     </table>
   `;
@@ -907,6 +931,19 @@ function downloadReportCSV(worker,date,rows){
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `${worker}_${date}_report.csv`;
+  a.click();
+}
+
+function downloadReportCSVMulti(date,rows){
+  let csv = 'Worker,Customer,Address,Round,ListPrice,PriceCharged,Status,CashTaken,OwedAfter,Note\n';
+  rows.forEach(r=>{
+    csv += [r.worker,r.job.customer,r.job.address,r.job.round,r.job.price.toFixed(2),r.price.toFixed(2),r.status,r.payment.toFixed(2),r.owedAfter.toFixed(2),r.note||'']
+      .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',') + '\n';
+  });
+  const blob = new Blob([csv],{type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `all-workers_${date}_report.csv`;
   a.click();
 }
 
@@ -1083,7 +1120,7 @@ async function renderAdminUpload(main){
 function renderAdminReport(main){
   const card = document.createElement('div');
   card.className = 'card pad';
-  const options = WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
+  const options = `<option value="ALL">All workers</option>` + WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
   card.innerHTML = `
     <div class="section-title">View a report</div>
     <div class="stack">
@@ -1098,16 +1135,65 @@ function renderAdminReport(main){
   async function showReport(){
     const worker = card.querySelector('#rWorker').value;
     const date = card.querySelector('#rDate').value;
-    const jobs = await loadJobs(worker,date);
     const out = card.querySelector('#rOut');
+
+    if(worker === 'ALL'){
+      const results = await Promise.all(WORKERS.map(async w=>{
+        const jobs = await loadJobs(w,date);
+        const prog = jobs ? await loadProgress(w,date) : {};
+        return { w, jobs: jobs || [], prog };
+      }));
+      let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0, totalJobs=0;
+      const allRows = [];
+      results.forEach(({w, jobs, prog})=>{
+        totalJobs += jobs.length;
+        jobs.slice().sort((a,b)=>a.order-b.order).forEach(j=>{
+          const p = prog[j.id] || {status:'todo',payment:0};
+          const payment = parseFloat(p.payment)||0;
+          const price = resolvedPrice(j,p);
+          collected += payment;
+          if(p.status==='done') doneN++;
+          if(p.status==='skipped') skippedN++;
+          if(p.status==='cancelled') cancelledN++;
+          const debt = -j.balance;
+          const owedAfter = debt + price - payment;
+          if(p.status !== 'cancelled') outstanding += owedAfter;
+          allRows.push({worker:w,job:j,status:p.status,payment,price,note:p.note||'',owedAfter});
+        });
+      });
+      if(!totalJobs){ out.innerHTML = `<p class="muted">No rounds loaded for ${date} yet.</p>`; return; }
+      const completeRows = allRows.filter(r=>r.status==='done');
+      out.innerHTML = `
+        <table class="report">
+          <tr><td>Jobs done</td><td class="num">${doneN} / ${totalJobs}</td></tr>
+          <tr><td>Skipped</td><td class="num">${skippedN}</td></tr>
+          <tr><td>Cancelled</td><td class="num">${cancelledN}</td></tr>
+          <tr><td>Cash collected</td><td class="num">${money(collected)}</td></tr>
+          <tr><td>Still outstanding</td><td class="num">${money(outstanding)}</td></tr>
+        </table>
+        <div class="section-title" style="margin-top:16px;">All complete jobs</div>
+        <table class="report">
+          <tr><th>Worker</th><th>Customer</th><th>Paid</th></tr>
+          ${completeRows.length ? completeRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td class="num">${money(r.payment)}</td></tr>`).join('') : `<tr><td colspan="3" class="muted">No completed jobs yet.</td></tr>`}
+        </table>
+        <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
+      `;
+      out.querySelector('#rCsv').onclick = ()=> downloadReportCSVMulti(date, allRows);
+      return;
+    }
+
+    const jobs = await loadJobs(worker,date);
     if(!jobs){ out.innerHTML = `<p class="muted">No round loaded for ${worker} on ${date}.</p>`; return; }
     const prog = await loadProgress(worker,date);
-    let collected=0, outstanding=0;
+    let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0;
     const rows = jobs.slice().sort((a,b)=>a.order-b.order).map(j=>{
       const p = prog[j.id] || {status:'todo',payment:0};
       const payment = parseFloat(p.payment)||0;
       const price = resolvedPrice(j,p);
       collected += payment;
+      if(p.status==='done') doneN++;
+      if(p.status==='skipped') skippedN++;
+      if(p.status==='cancelled') cancelledN++;
       const debt = -j.balance;
       const owedAfter = debt + price - payment;
       if(p.status !== 'cancelled') outstanding += owedAfter;
@@ -1115,10 +1201,16 @@ function renderAdminReport(main){
     });
     out.innerHTML = `
       <table class="report">
-        <tr><th>Customer</th><th>Status</th><th>Price</th><th>Paid</th><th>Owed</th></tr>
-        ${rows.map(r=>`<tr><td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${r.status}</span></td><td class="num">${money(r.price)}</td><td class="num">${money(r.payment)}</td><td class="num">${money(r.owedAfter)}</td></tr>`).join('')}
+        <tr><td>Jobs done</td><td class="num">${doneN} / ${jobs.length}</td></tr>
+        <tr><td>Skipped</td><td class="num">${skippedN}</td></tr>
+        <tr><td>Cancelled</td><td class="num">${cancelledN}</td></tr>
+        <tr><td>Cash collected</td><td class="num">${money(collected)}</td></tr>
+        <tr><td>Still outstanding</td><td class="num">${money(outstanding)}</td></tr>
       </table>
-      <div class="note-box" style="margin-top:10px;">Collected ${money(collected)} · Outstanding ${money(outstanding)}</div>
+      <table class="report" style="margin-top:14px;">
+        <tr><th>Customer</th><th>Status</th><th>Paid</th></tr>
+        ${rows.map(r=>`<tr><td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${r.status}</span></td><td class="num">${money(r.payment)}</td></tr>`).join('')}
+      </table>
       <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
     `;
     out.querySelector('#rCsv').onclick = ()=> downloadReportCSV(worker,date,rows);
