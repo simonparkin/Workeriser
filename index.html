@@ -255,6 +255,7 @@
   table.report th,table.report td{padding:7px 6px;text-align:left;border-bottom:1px solid var(--line);}
   table.report th{font-size:10.5px;text-transform:uppercase;color:var(--ink-soft);letter-spacing:.03em;}
   table.report td.num{text-align:right;font-weight:600;}
+  table.report th.num{text-align:right;}
   .badge{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;font-weight:700;}
   .badge-done{background:var(--green-bg);color:var(--green);}
   .badge-skipped{background:#fbf3e0;color:var(--amber-deep);}
@@ -883,7 +884,7 @@ async function renderDaySummary(){
   card2.innerHTML = `
     <div class="section-title">Job by job</div>
     <table class="report">
-      <tr><th>Customer</th><th>Status</th><th>Paid</th></tr>
+      <tr><th>Customer</th><th>Status</th><th class="num">Paid</th></tr>
       ${tableRows}
     </table>
   `;
@@ -1162,7 +1163,7 @@ function renderAdminReport(main){
         });
       });
       if(!totalJobs){ out.innerHTML = `<p class="muted">No rounds loaded for ${date} yet.</p>`; return; }
-      const completeRows = allRows.filter(r=>r.status==='done');
+      const completeRows = allRows.filter(r=>r.status!=='todo');
       out.innerHTML = `
         <table class="report">
           <tr><td>Jobs done</td><td class="num">${doneN} / ${totalJobs}</td></tr>
@@ -1171,10 +1172,10 @@ function renderAdminReport(main){
           <tr><td>Cash collected</td><td class="num">${money(collected)}</td></tr>
           <tr><td>Still outstanding</td><td class="num">${money(outstanding)}</td></tr>
         </table>
-        <div class="section-title" style="margin-top:16px;">All complete jobs</div>
+        <div class="section-title" style="margin-top:16px;">All completed jobs</div>
         <table class="report">
-          <tr><th>Worker</th><th>Customer</th><th>Status</th><th>Paid</th></tr>
-          ${completeRows.length ? completeRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${r.status}</span></td><td class="num">${money(r.payment)}</td></tr>`).join('') : `<tr><td colspan="4" class="muted">No completed jobs yet.</td></tr>`}
+          <tr><th>Worker</th><th>Address</th><th>Status</th><th class="num">Paid</th></tr>
+          ${completeRows.length ? completeRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${r.status}</span></td><td class="num">${money(r.payment)}</td></tr>`).join('') : `<tr><td colspan="4" class="muted">No completed jobs yet.</td></tr>`}
         </table>
         <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
       `;
@@ -1208,7 +1209,7 @@ function renderAdminReport(main){
         <tr><td>Still outstanding</td><td class="num">${money(outstanding)}</td></tr>
       </table>
       <table class="report" style="margin-top:14px;">
-        <tr><th>Customer</th><th>Status</th><th>Paid</th></tr>
+        <tr><th>Customer</th><th>Status</th><th class="num">Paid</th></tr>
         ${rows.map(r=>`<tr><td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${r.status}</span></td><td class="num">${money(r.payment)}</td></tr>`).join('')}
       </table>
       <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
