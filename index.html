@@ -120,25 +120,40 @@
   .job-card.status-cancelled{border-color:#f0c9c9;background:var(--red-bg);opacity:.75;}
 
   .job-top{display:flex;justify-content:space-between;gap:10px;}
-  .job-info .cust{font-weight:700;font-size:15.5px;line-height:1.25;}
-  .addr-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:2px;}
-  .job-info .addr{font-size:13px;color:var(--ink-soft);}
+  .job-info .addr{font-weight:700;font-size:15.5px;line-height:1.3;color:var(--ink);}
+  .cust-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:3px;}
+  .job-info .cust{font-size:13px;color:var(--ink-soft);}
+  .phone-btn{
+    display:inline-flex;align-items:center;gap:4px;
+    color:var(--navy);text-decoration:none;font-size:12.5px;font-weight:700;
+    background:var(--slate-bg);border-radius:20px;padding:2px 8px 2px 7px;
+  }
+  .phone-btn:active{background:var(--line);}
   .nav-btn{
-    display:inline-flex;align-items:center;gap:4px;flex:none;
+    display:inline-flex;align-items:center;gap:4px;flex:none;width:fit-content;
     background:var(--navy);color:#fff;text-decoration:none;
     font-size:11px;font-weight:700;padding:3px 8px 3px 7px;border-radius:20px;
-    white-space:nowrap;
+    white-space:nowrap;margin-top:7px;
   }
   .nav-btn:active{background:var(--navy-deep);}
-  .job-info .notes{font-size:12.5px;color:var(--amber-deep);margin-top:4px;font-weight:600;}
+  .job-info .notes{font-size:12.5px;color:var(--amber-deep);margin-top:6px;font-weight:600;}
   .job-card.status-cancelled .cust,.job-card.status-cancelled .addr{text-decoration:line-through;}
 
   .price-block{text-align:right;flex:none;}
-  .price-block .full{font-family:'Space Grotesk';font-weight:700;font-size:19px;color:var(--navy-deep);}
-  .price-block .front{
-    display:inline-block;margin-top:3px;font-size:11px;font-weight:700;
-    background:var(--navy);color:#fff;border-radius:6px;padding:2px 6px;
+  .price-edit{display:flex;align-items:center;justify-content:flex-end;gap:2px;}
+  .price-edit .pfx{font-family:'Space Grotesk';font-weight:700;font-size:19px;color:var(--navy-deep);}
+  .price-input{
+    width:64px;border:none;background:transparent;text-align:right;
+    font-family:'Space Grotesk';font-weight:700;font-size:19px;color:var(--navy-deep);
+    padding:2px 0;border-bottom:1.5px dashed var(--line);
   }
+  .price-input:focus{outline:none;border-bottom-color:var(--navy);}
+  .price-block .front{
+    display:inline-block;margin-top:5px;font-size:11px;font-weight:700;
+    background:var(--navy);color:#fff;border-radius:6px;padding:3px 7px;
+    border:none;cursor:pointer;font-family:inherit;
+  }
+  .price-block .front:active{background:var(--navy-deep);}
 
   .job-meta{display:flex;gap:14px;margin-top:10px;font-size:12.5px;color:var(--ink-soft);flex-wrap:wrap;}
   .job-meta span b{color:var(--ink);}
@@ -166,6 +181,14 @@
   .pay-row input:focus{outline:2px solid var(--navy);border-color:var(--navy);}
   .owed-after{margin-top:8px;font-size:12.5px;font-weight:600;color:var(--ink-soft);}
   .owed-after b{color:var(--ink);}
+
+  .note-field{margin-top:10px;}
+  .note-field label{font-size:12.5px;color:var(--ink-soft);font-weight:600;display:block;margin-bottom:5px;}
+  .note-field textarea{
+    width:100%;border:1.5px solid var(--line);border-radius:9px;padding:8px 9px;
+    font-size:13.5px;font-family:'Inter';background:#fbfcfd;resize:vertical;
+  }
+  .note-field textarea:focus{outline:2px solid var(--navy);border-color:var(--navy);}
 
   /* squeegee wipe */
   .wipe{
@@ -250,8 +273,8 @@ import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/fireb
    1. Go to https://console.firebase.google.com, create a free project.
    2. In the project, click the </> (web app) icon to register a web app —
       it will show you a firebaseConfig object. Copy those values in below.
-   3. In the left menu go to Build > Firestore Database > Create database
-      (choose "Start in test mode" to begin with).
+   3. In the left menu go to Databases & Storage > Firestore > Create database
+      (choose the open/permissive starting rules option, not "Restrictive").
    4. Later, tighten the rules in Firestore > Rules to something like:
         rules_version = '2';
         service cloud.firestore {
@@ -386,12 +409,14 @@ function rowsToJobs(rows){
     const lon = parseFloat(pick(r,['Job Longitude','Customer Longitude']));
     const address = pick(r,['Job Address','Customer Address','Address']);
     const postcode = pick(r,['Job Postcode','Customer Postcode']);
+    const phone = pick(r,['Job Phone 1','Customer Phone 1','Phone 1']);
     return {
       id: pick(r,['Aworka Job ID','Aworka ID','Job Ref']) || ('row'+idx),
       order: idx,
       customer: (pick(r,['Customer Name','Customer']) || '').trim() || '(no name on file)',
       address: address,
       postcode: postcode,
+      phone: phone,
       lat: isFinite(lat) ? lat : null,
       lon: isFinite(lon) ? lon : null,
       round: pick(r,['Round']) || '',
@@ -512,15 +537,26 @@ function escapeHtml(str){
   return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
 }
 
+function resolvedPrice(job, p){
+  return (p && p.price !== undefined && p.price !== '' && !isNaN(parseFloat(p.price))) ? parseFloat(p.price) : job.price;
+}
+
 /* ================= RENDER ROUTER ================= */
+let lastScreenRendered = null;
 async function render(){
   if(!configOk){ renderNeedsSetup(); return; }
-  app.innerHTML = '<div class="center-screen"><p class="muted">Loading…</p></div>';
+  const sameScreen = state.screen === lastScreenRendered;
+  const savedScroll = sameScreen ? window.scrollY : 0;
+  if(!sameScreen){
+    app.innerHTML = '<div class="center-screen"><p class="muted">Loading…</p></div>';
+  }
+  lastScreenRendered = state.screen;
   if(state.screen==='login') await renderLogin();
   else if(state.screen==='worker') await renderWorker();
   else if(state.screen==='daySummary') await renderDaySummary();
   else if(state.screen==='adminLogin') renderAdminLogin();
   else if(state.screen==='admin') await renderAdmin();
+  if(sameScreen) window.scrollTo(0, savedScroll);
 }
 
 function renderNeedsSetup(){
@@ -623,31 +659,37 @@ async function renderWorker(){
 }
 
 function renderJobCard(worker,date,job,prog){
-  const p = prog[job.id] || { status:'todo', payment:'' };
+  const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'' };
   const card = document.createElement('div');
   card.className = `card job-card status-${p.status}`;
 
   const debt = -job.balance; // positive = customer owes
   const balanceClass = debt > 0 ? 'balance-owe' : (debt < 0 ? 'balance-credit' : '');
   const balanceLabel = debt > 0 ? `Owes ${money(debt)}` : (debt < 0 ? `Credit ${money(-debt)}` : 'Balance £0');
+  const priceVal = (p.price !== undefined && p.price !== '' && !isNaN(parseFloat(p.price))) ? p.price : job.price;
+  const telHref = job.phone ? `tel:${job.phone.replace(/[^0-9+]/g,'')}` : '';
 
   card.innerHTML = `
     <div class="wipe"></div>
     <div class="job-top">
       <div class="job-info">
-        <div class="cust">${escapeHtml(job.customer)}</div>
-        <div class="addr-row">
-          <div class="addr">${escapeHtml(job.address)}</div>
-          <a class="nav-btn" href="${navUrl(job)}" target="_blank" rel="noopener">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M3 11l17-8-8 17-2-7-7-2z" fill="currentColor"/></svg>
-            Navigate
-          </a>
+        <div class="addr">${escapeHtml(job.address)}</div>
+        <div class="cust-row">
+          <span class="cust">${escapeHtml(job.customer)}</span>
+          ${job.phone ? `<a class="phone-btn" href="${telHref}">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none"><path d="M6 3h3l2 5-2.5 1.5a11 11 0 005 5L15 12l5 2v3a2 2 0 01-2 2A16 16 0 014 6a2 2 0 012-2z" fill="currentColor"/></svg>
+            ${escapeHtml(job.phone)}
+          </a>` : ''}
         </div>
+        <a class="nav-btn" href="${navUrl(job)}" target="_blank" rel="noopener">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M3 11l17-8-8 17-2-7-7-2z" fill="currentColor"/></svg>
+          Navigate
+        </a>
         ${job.notes ? `<div class="notes">⚠ ${escapeHtml(job.notes)}</div>` : ''}
       </div>
       <div class="price-block">
-        <div class="full">${money(job.price)}</div>
-        <div class="front">Front ${money(job.frontPrice)}</div>
+        <div class="price-edit"><span class="pfx">£</span><input type="number" class="price-input" inputmode="decimal" min="0" step="0.01" value="${priceVal}"></div>
+        <button type="button" class="front" title="Tap to charge the front price instead">Front ${money(job.frontPrice)}</button>
       </div>
     </div>
     <div class="job-meta">
@@ -662,14 +704,23 @@ function renderJobCard(worker,date,job,prog){
     <div class="pay-row">
       <label>Cash taken</label>
       <span class="pfx">£</span>
-      <input type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${p.payment || ''}">
+      <input type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${p.payment || ''}" class="pay-input">
     </div>
     <div class="owed-after"></div>
+    <div class="note-field">
+      <label>Job note</label>
+      <textarea placeholder="e.g. left key under mat, dog in garden…" rows="2">${escapeHtml(p.note || '')}</textarea>
+    </div>
   `;
 
+  const priceInput = card.querySelector('.price-input');
+  const payInput = card.querySelector('.pay-input');
+
+  function currentPrice(){ return parseFloat(priceInput.value) || 0; }
+
   function updateOwedAfter(){
-    const payment = parseFloat(card.querySelector('.pay-row input').value) || 0;
-    const owedAfter = debt + job.price - payment;
+    const payment = parseFloat(payInput.value) || 0;
+    const owedAfter = debt + currentPrice() - payment;
     const el = card.querySelector('.owed-after');
     if(owedAfter > 0.004) el.innerHTML = `Owed after this clean: <b style="color:var(--red)">${money(owedAfter)}</b>`;
     else if(owedAfter < -0.004) el.innerHTML = `In credit after this clean: <b style="color:var(--green)">${money(-owedAfter)}</b>`;
@@ -677,15 +728,23 @@ function renderJobCard(worker,date,job,prog){
   }
   updateOwedAfter();
 
+  async function persist(mutator){
+    const prog2 = await loadProgress(worker,date);
+    const current = prog2[job.id] || {status:'todo',payment:'',price:'',note:''};
+    mutator(current);
+    prog2[job.id] = current;
+    await saveProgress(worker,date,prog2);
+  }
+
   card.querySelectorAll('.status-btn').forEach(btn=>{
     btn.onclick = async ()=>{
       const action = btn.dataset.action;
-      const prog2 = await loadProgress(worker,date);
-      const current = prog2[job.id] || {status:'todo',payment:''};
-      current.status = current.status === action ? 'todo' : action;
-      prog2[job.id] = current;
-      await saveProgress(worker,date,prog2);
-      if(action==='done' && current.status==='done'){
+      let newStatus;
+      await persist(current=>{
+        newStatus = current.status === action ? 'todo' : action;
+        current.status = newStatus;
+      });
+      if(action==='done' && newStatus==='done'){
         card.classList.add('status-done');
         const wipe = card.querySelector('.wipe');
         wipe.classList.add('play');
@@ -694,14 +753,24 @@ function renderJobCard(worker,date,job,prog){
     };
   });
 
-  const input = card.querySelector('.pay-row input');
-  input.addEventListener('input', async ()=>{
+  priceInput.addEventListener('input', ()=>{
     updateOwedAfter();
-    const prog2 = await loadProgress(worker,date);
-    const current = prog2[job.id] || {status:'todo',payment:''};
-    current.payment = input.value;
-    prog2[job.id] = current;
-    await saveProgress(worker,date,prog2);
+    persist(current=>{ current.price = priceInput.value; });
+  });
+
+  card.querySelector('.front').onclick = ()=>{
+    priceInput.value = job.frontPrice;
+    updateOwedAfter();
+    persist(current=>{ current.price = priceInput.value; });
+  };
+
+  payInput.addEventListener('input', ()=>{
+    updateOwedAfter();
+    persist(current=>{ current.payment = payInput.value; });
+  });
+
+  card.querySelector('.note-field textarea').addEventListener('input', (e)=>{
+    persist(current=>{ current.note = e.target.value; });
   });
 
   return card;
@@ -732,14 +801,15 @@ async function renderDaySummary(){
   const rows = jobs.slice().sort((a,b)=>a.order-b.order).map(j=>{
     const p = prog[j.id] || {status:'todo',payment:0};
     const payment = parseFloat(p.payment)||0;
+    const price = resolvedPrice(j,p);
     collected += payment;
     if(p.status==='done') doneN++;
     if(p.status==='skipped') skippedN++;
     if(p.status==='cancelled') cancelledN++;
     const debt = -j.balance;
-    const owedAfter = debt + j.price - payment;
+    const owedAfter = debt + price - payment;
     if(p.status !== 'cancelled') outstanding += owedAfter;
-    return {job:j,status:p.status,payment,owedAfter};
+    return {job:j,status:p.status,payment,price,note:p.note||'',owedAfter};
   });
 
   const card = document.createElement('div');
@@ -761,15 +831,16 @@ async function renderDaySummary(){
   card2.style.marginTop = '14px';
   let tableRows = rows.map(r=>`
     <tr>
-      <td>${escapeHtml(r.job.customer)}</td>
+      <td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td>
       <td><span class="badge badge-${r.status}">${r.status}</span></td>
+      <td class="num">${money(r.price)}</td>
       <td class="num">${money(r.payment)}</td>
       <td class="num">${money(r.owedAfter)}</td>
     </tr>`).join('');
   card2.innerHTML = `
     <div class="section-title">Job by job</div>
     <table class="report">
-      <tr><th>Customer</th><th>Status</th><th>Paid</th><th>Owed</th></tr>
+      <tr><th>Customer</th><th>Status</th><th>Price</th><th>Paid</th><th>Owed</th></tr>
       ${tableRows}
     </table>
   `;
@@ -802,15 +873,15 @@ function buildReportText(worker,date,rows,totals){
   lines.push(`Collected: ${money(totals.collected)}   Outstanding: ${money(totals.outstanding)}`);
   lines.push('');
   rows.forEach(r=>{
-    lines.push(`${r.job.customer} — ${r.status}${r.payment?`, paid ${money(r.payment)}`:''}${r.owedAfter>0.004?`, owes ${money(r.owedAfter)}`:''}`);
+    lines.push(`${r.job.customer} — ${r.status}, charged ${money(r.price)}${r.payment?`, paid ${money(r.payment)}`:''}${r.owedAfter>0.004?`, owes ${money(r.owedAfter)}`:''}${r.note?` — note: ${r.note}`:''}`);
   });
   return lines.join('\n');
 }
 
 function downloadReportCSV(worker,date,rows){
-  let csv = 'Customer,Address,Round,Price,FrontPrice,Status,CashTaken,OwedAfter\n';
+  let csv = 'Customer,Address,Round,ListPrice,PriceCharged,Status,CashTaken,OwedAfter,Note\n';
   rows.forEach(r=>{
-    csv += [r.job.customer,r.job.address,r.job.round,r.job.price.toFixed(2),r.job.frontPrice.toFixed(2),r.status,r.payment.toFixed(2),r.owedAfter.toFixed(2)]
+    csv += [r.job.customer,r.job.address,r.job.round,r.job.price.toFixed(2),r.price.toFixed(2),r.status,r.payment.toFixed(2),r.owedAfter.toFixed(2),r.note||'']
       .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',') + '\n';
   });
   const blob = new Blob([csv],{type:'text/csv'});
@@ -1016,16 +1087,17 @@ function renderAdminReport(main){
     const rows = jobs.slice().sort((a,b)=>a.order-b.order).map(j=>{
       const p = prog[j.id] || {status:'todo',payment:0};
       const payment = parseFloat(p.payment)||0;
+      const price = resolvedPrice(j,p);
       collected += payment;
       const debt = -j.balance;
-      const owedAfter = debt + j.price - payment;
+      const owedAfter = debt + price - payment;
       if(p.status !== 'cancelled') outstanding += owedAfter;
-      return {job:j,status:p.status,payment,owedAfter};
+      return {job:j,status:p.status,payment,price,note:p.note||'',owedAfter};
     });
     out.innerHTML = `
       <table class="report">
-        <tr><th>Customer</th><th>Status</th><th>Paid</th><th>Owed</th></tr>
-        ${rows.map(r=>`<tr><td>${escapeHtml(r.job.customer)}</td><td><span class="badge badge-${r.status}">${r.status}</span></td><td class="num">${money(r.payment)}</td><td class="num">${money(r.owedAfter)}</td></tr>`).join('')}
+        <tr><th>Customer</th><th>Status</th><th>Price</th><th>Paid</th><th>Owed</th></tr>
+        ${rows.map(r=>`<tr><td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${r.status}</span></td><td class="num">${money(r.price)}</td><td class="num">${money(r.payment)}</td><td class="num">${money(r.owedAfter)}</td></tr>`).join('')}
       </table>
       <div class="note-box" style="margin-top:10px;">Collected ${money(collected)} · Outstanding ${money(outstanding)}</div>
       <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
