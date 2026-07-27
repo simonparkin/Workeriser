@@ -495,6 +495,7 @@ function rowsToJobs(rows){
     const address = pick(r,['Job Address','Customer Address','Address']);
     const postcode = pick(r,['Job Postcode','Customer Postcode']);
     const phone = pick(r,['Job Phone 1','Customer Phone 1','Phone 1']);
+    const csvStatus = (pick(r,['Status']) || '').trim().toLowerCase();
     return {
       id: pick(r,['Aworka Job ID','Aworka ID','Job Ref']) || ('row'+idx),
       order: idx,
@@ -510,7 +511,8 @@ function rowsToJobs(rows){
       balance: balance,
       notes: pick(r,['Job Day Notes','Notes','Description','Job Notes']),
       timeRequired: pick(r,['Time Required']),
-      frequency: pick(r,['Frequency'])
+      frequency: pick(r,['Frequency']),
+      initialStatus: csvStatus === 'skip' ? 'skipped' : null
     };
   });
 }
@@ -1291,9 +1293,25 @@ async function renderAdminUpload(main){
         const jobs = rowsToJobs(rows);
         if(!jobs.length){ toast('No rows found in that file'); return; }
         const missing = await resolveCoordinates(jobs);
+        const preSkipped = jobs.filter(j=>j.initialStatus==='skipped');
+        jobs.forEach(j=>{ delete j.initialStatus; });
         await saveJobs(worker,date,jobs);
+        if(preSkipped.length){
+          const existingProg = await loadProgress(worker,date);
+          let changed = false;
+          preSkipped.forEach(j=>{
+            if(!existingProg[j.id]){
+              existingProg[j.id] = { status:'skipped', payment:'', price:'', note:'' };
+              changed = true;
+            }
+          });
+          if(changed) await saveProgress(worker,date,existingProg);
+        }
         await refreshLoadedRounds();
         let msg = `Loaded <b>${jobs.length}</b> jobs for <b>${worker}</b> on <b>${date}</b>.`;
+        if(preSkipped.length){
+          msg += ` ${preSkipped.length} marked as skipped from the file.`;
+        }
         if(missing.length){
           msg += `<br><br>⚠ ${missing.length} address${missing.length===1?'':'es'} couldn't be matched to coordinates:<br>` +
             missing.map(m=>'• '+escapeHtml(m)).join('<br>') +
