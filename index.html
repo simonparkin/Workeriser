@@ -202,11 +202,11 @@
   .status-btn.active-skipped{background:var(--amber);border-color:var(--amber);color:#3a2a00;}
   .status-btn.active-cancelled{background:var(--red);border-color:var(--red);color:#fff;}
   .reject-btn{
-    width:100%;margin-top:8px;background:transparent;border:1.5px dashed var(--line);
-    color:var(--ink-soft);border-radius:9px;padding:7px 4px;font-size:12px;font-weight:600;
+    width:100%;margin-top:8px;background:transparent;border:1.5px dashed var(--red);
+    color:var(--red);border-radius:9px;padding:7px 4px;font-size:12px;font-weight:600;
     cursor:pointer;font-family:inherit;
   }
-  .reject-btn:active{background:var(--slate-bg);}
+  .reject-btn:active{background:var(--red-bg);}
   .reject-btn:disabled{opacity:.6;}
 
   .pay-row{display:flex;gap:10px;margin-top:12px;}
@@ -413,11 +413,12 @@ async function findAnyDateForWorker(worker){
 // moves a set of jobs (by id) from one worker's round to another's, for the same date,
 // carrying over any progress (payment/price/note) already recorded against them
 async function moveJobsToWorker(fromWorker, toWorker, date, jobIds){
-  const [fromJobs, fromProg, toJobsRaw, toProgRaw] = await Promise.all([
+  const [fromJobs, fromProg, toJobsRaw, toProgRaw, lookup] = await Promise.all([
     loadJobs(fromWorker,date),
     loadProgress(fromWorker,date),
     loadJobs(toWorker,date),
-    loadProgress(toWorker,date)
+    loadProgress(toWorker,date),
+    loadCoordLookup()
   ]);
   const idSet = new Set(jobIds);
   const source = fromJobs || [];
@@ -425,15 +426,21 @@ async function moveJobsToWorker(fromWorker, toWorker, date, jobIds){
   const remaining = source.filter(j=>!idSet.has(j.id));
   const toJobs = toJobsRaw || [];
   const toProg = toProgRaw || {};
-  let nextOrder = toJobs.length ? Math.max(...toJobs.map(j=>j.order)) + 1 : 0;
   moving.forEach(j=>{
-    j.order = nextOrder++;
     toJobs.push(j);
     if(fromProg[j.id]){
       toProg[j.id] = fromProg[j.id];
       delete fromProg[j.id];
     }
   });
+  // reinsert into round order where possible (falls back to append-at-end if no round order is on file)
+  const roundOrder = lookup.roundOrder || [];
+  function roundRank(roundName){
+    const idx = roundOrder.indexOf(roundName);
+    return idx === -1 ? Infinity : idx;
+  }
+  toJobs.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
+  toJobs.forEach((j,idx)=>{ j.order = idx; });
   await Promise.all([
     saveJobs(fromWorker, date, remaining),
     saveJobs(toWorker, date, toJobs),
@@ -940,7 +947,6 @@ function renderJobCard(worker,date,job,prog,refreshStats){
       <button class="status-btn ${p.status==='skipped'?'active-skipped':''}" data-action="skipped"><span class="ic">↷</span>Skipped</button>
       <button class="status-btn ${p.status==='cancelled'?'active-cancelled':''}" data-action="cancelled"><span class="ic">✕</span>Cancelled</button>
     </div>
-    ${worker!=='Simon' && p.status==='todo' ? `<button type="button" class="reject-btn">Reject</button>` : ''}
     <div class="pay-row">
       <div class="pay-field">
         <label>Cash paid</label>
@@ -955,6 +961,7 @@ function renderJobCard(worker,date,job,prog,refreshStats){
       <label>Job note</label>
       <textarea rows="2">${escapeHtml(p.note || '')}</textarea>
     </div>
+    ${worker!=='Simon' && p.status==='todo' ? `<button type="button" class="reject-btn">Reject</button>` : ''}
   `;
 
   const priceInput = card.querySelector('.price-input');
