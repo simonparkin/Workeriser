@@ -1004,9 +1004,9 @@ function renderJobCard(worker,date,job,prog,refreshStats){
     const chargeToday = (currentStatus==='skipped' || currentStatus==='cancelled') ? 0 : currentPrice();
     const owedAfter = debt + chargeToday - payment;
     const el = card.querySelector('.balance-value');
-    if(owedAfter > 0.004) el.innerHTML = `<b style="color:var(--red)">Owes ${money(owedAfter)}</b>`;
-    else if(owedAfter < -0.004) el.innerHTML = `<b style="color:var(--green)">Credit ${money(-owedAfter)}</b>`;
-    else el.innerHTML = `<b style="color:var(--green)">Settled</b>`;
+    if(owedAfter > 0.004) el.innerHTML = `<b style="color:var(--red)">${money(owedAfter)}</b>`;
+    else if(owedAfter < -0.004) el.innerHTML = `<b style="color:var(--green)">${money(-owedAfter)}</b>`;
+    else el.innerHTML = `<b style="color:var(--green)">£0.00</b>`;
   }
   updateOwedAfter();
 
