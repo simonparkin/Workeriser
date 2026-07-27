@@ -1173,8 +1173,8 @@ function renderAdminReport(main){
         </table>
         <div class="section-title" style="margin-top:16px;">All complete jobs</div>
         <table class="report">
-          <tr><th>Worker</th><th>Customer</th><th>Paid</th></tr>
-          ${completeRows.length ? completeRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td class="num">${money(r.payment)}</td></tr>`).join('') : `<tr><td colspan="3" class="muted">No completed jobs yet.</td></tr>`}
+          <tr><th>Worker</th><th>Customer</th><th>Status</th><th>Paid</th></tr>
+          ${completeRows.length ? completeRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${r.status}</span></td><td class="num">${money(r.payment)}</td></tr>`).join('') : `<tr><td colspan="4" class="muted">No completed jobs yet.</td></tr>`}
         </table>
         <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
       `;
