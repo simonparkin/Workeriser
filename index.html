@@ -241,51 +241,104 @@
 <body>
 <div id="app"></div>
 
-<script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+/* =========================================================================
+   FIREBASE SETUP — fill this in so every phone shares the same data.
+   1. Go to https://console.firebase.google.com, create a free project.
+   2. In the project, click the </> (web app) icon to register a web app —
+      it will show you a firebaseConfig object. Copy those values in below.
+   3. In the left menu go to Build > Firestore Database > Create database
+      (choose "Start in test mode" to begin with).
+   4. Later, tighten the rules in Firestore > Rules to something like:
+        rules_version = '2';
+        service cloud.firestore {
+          match /databases/{database}/documents {
+            match /workeriser/{docId} { allow read, write: if true; }
+          }
+        }
+      (This keeps it simple, no logins — same "not high security, just
+      keeps casual browsers out" level as the office password.)
+   ========================================================================= */
+const firebaseConfig = {
+  apiKey: "AIzaSyABEfdCUcjsaHwpu78luEE25R9__jgg0Q4",
+  authDomain: "workeriser.firebaseapp.com",
+  projectId: "workeriser",
+  storageBucket: "workeriser.firebasestorage.app",
+  messagingSenderId: "5012320559",
+  appId: "1:5012320559:web:047bc3931048a27cd171da"
+};
+
+const configOk = !!firebaseConfig.apiKey && !firebaseConfig.apiKey.startsWith('PASTE_');
+let db = null;
+if(configOk){
+  try{
+    const fbApp = initializeApp(firebaseConfig);
+    db = getFirestore(fbApp);
+  }catch(err){ console.error('Firebase init failed', err); }
+}
+
+async function fsGet(key){
+  if(!db) return null;
+  try{
+    const snap = await getDoc(doc(db,'workeriser',key));
+    return snap.exists() ? snap.data().value : null;
+  }catch(err){
+    console.error('fsGet failed', key, err);
+    toast('Connection problem loading data');
+    return null;
+  }
+}
+async function fsSet(key, value){
+  if(!db) return false;
+  try{
+    await setDoc(doc(db,'workeriser',key), { value, updatedAt: Date.now() });
+    return true;
+  }catch(err){
+    console.error('fsSet failed', key, err);
+    toast('Connection problem saving — try again');
+    return false;
+  }
+}
+
 /* ================= CONFIG / STORAGE ================= */
 const WORKERS = ['Jim','Vlado','Shane'];
-const LS = {
-  jobs: (w,d)=>`wjt_jobs_${w}_${d}`,
-  progress: (w,d)=>`wjt_progress_${w}_${d}`,
-  pw: 'wjt_admin_pw',
-  lastDate: (w)=>`wjt_lastdate_${w}`
-};
+// Required whenever the office area hasn't had a custom password set for this
+// shared database. Visible to anyone who views the page source — this is a
+// "keep casual browsers out" lock, not real security.
+const DEFAULT_ADMIN_PW = 'squeegee2026';
+
 function todayStr(){
   const d = new Date();
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 }
-function getPassword(){ return localStorage.getItem(LS.pw) || null; }
-function setPassword(p){ localStorage.setItem(LS.pw, p); }
 
-function loadJobs(worker,date){
-  const raw = localStorage.getItem(LS.jobs(worker,date));
-  return raw ? JSON.parse(raw) : null;
+async function getPassword(){ const v = await fsGet('admin_pw'); return v || DEFAULT_ADMIN_PW; }
+async function setPassword(p){ await fsSet('admin_pw', p); }
+
+async function getMeta(){
+  const m = await fsGet('meta');
+  return m || { lastDate:{}, rounds:[] };
 }
-function saveJobs(worker,date,jobs){
-  localStorage.setItem(LS.jobs(worker,date), JSON.stringify(jobs));
-  localStorage.setItem(LS.lastDate(worker), date);
+async function saveMeta(meta){ await fsSet('meta', meta); }
+
+async function loadJobs(worker,date){ return await fsGet(`jobs_${worker}_${date}`); }
+async function saveJobs(worker,date,jobs){
+  await fsSet(`jobs_${worker}_${date}`, jobs);
+  const meta = await getMeta();
+  meta.lastDate[worker] = date;
+  const key = `${worker}|${date}`;
+  if(!meta.rounds.includes(key)) meta.rounds.push(key);
+  await saveMeta(meta);
 }
-function loadProgress(worker,date){
-  const raw = localStorage.getItem(LS.progress(worker,date));
-  return raw ? JSON.parse(raw) : {};
-}
-function saveProgress(worker,date,prog){
-  localStorage.setItem(LS.progress(worker,date), JSON.stringify(prog));
-}
-function findAnyDateForWorker(worker){
-  // look for most recent stored job list for this worker
-  const last = localStorage.getItem(LS.lastDate(worker));
-  if(last && loadJobs(worker,last)) return last;
-  // fallback: scan localStorage keys
-  let found = null;
-  for(let i=0;i<localStorage.length;i++){
-    const k = localStorage.key(i);
-    if(k.startsWith(`wjt_jobs_${worker}_`)){
-      const d = k.replace(`wjt_jobs_${worker}_`,'');
-      if(!found || d > found) found = d;
-    }
-  }
-  return found;
+async function loadProgress(worker,date){ return (await fsGet(`progress_${worker}_${date}`)) || {}; }
+async function saveProgress(worker,date,prog){ await fsSet(`progress_${worker}_${date}`, prog); }
+
+async function findAnyDateForWorker(worker){
+  const meta = await getMeta();
+  return meta.lastDate[worker] || null;
 }
 
 /* ================= CSV PARSING ================= */
@@ -361,12 +414,8 @@ function navUrl(job){
 }
 
 /* ---- coordinate reference lookup (address -> lat/lon), updated occasionally ---- */
-const COORD_LS = 'wjt_coord_lookup';
-function loadCoordLookup(){
-  const raw = localStorage.getItem(COORD_LS);
-  return raw ? JSON.parse(raw) : { updatedAt:null, addresses:{} };
-}
-function saveCoordLookup(lookup){ localStorage.setItem(COORD_LS, JSON.stringify(lookup)); }
+async function loadCoordLookup(){ return (await fsGet('coord_lookup')) || { updatedAt:null, addresses:{} }; }
+async function saveCoordLookup(lookup){ await fsSet('coord_lookup', lookup); }
 
 function normAddr(a){
   return (a||'').toLowerCase().replace(/[^a-z0-9, ]/g,'').replace(/\s+/g,' ').trim();
@@ -401,8 +450,8 @@ function findCoordsForAddress(address, lookup){
 }
 
 // fills in missing coordinates on a set of jobs from the stored lookup; returns list of addresses still missing
-function resolveCoordinates(jobs){
-  const lookup = loadCoordLookup();
+async function resolveCoordinates(jobs){
+  const lookup = await loadCoordLookup();
   const missing = [];
   jobs.forEach(job=>{
     if(job.lat == null || job.lon == null){
@@ -417,13 +466,14 @@ function resolveCoordinates(jobs){
 }
 
 // after a fresh coordinate reference is uploaded, retroactively fill in any already-loaded rounds
-function rescanAllRoundsForCoords(){
-  const lookup = loadCoordLookup();
+async function rescanAllRoundsForCoords(){
+  const lookup = await loadCoordLookup();
+  const meta = await getMeta();
   let fixed = 0, stillMissing = 0;
-  for(let i=0;i<localStorage.length;i++){
-    const k = localStorage.key(i);
-    if(!k || !k.startsWith('wjt_jobs_')) continue;
-    const jobs = JSON.parse(localStorage.getItem(k));
+  for(const key of meta.rounds){
+    const [worker,date] = key.split('|');
+    const jobs = await fsGet(`jobs_${worker}_${date}`);
+    if(!jobs) continue;
     let changed = false;
     jobs.forEach(job=>{
       if(job.lat == null || job.lon == null){
@@ -432,7 +482,7 @@ function rescanAllRoundsForCoords(){
         else stillMissing++;
       }
     });
-    if(changed) localStorage.setItem(k, JSON.stringify(jobs));
+    if(changed) await fsSet(`jobs_${worker}_${date}`, jobs);
   }
   return { fixed, stillMissing };
 }
@@ -458,18 +508,32 @@ function money(n){
   return sign + '£' + Math.abs(v).toFixed(2);
 }
 
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
+}
+
 /* ================= RENDER ROUTER ================= */
-function render(){
-  app.innerHTML = '';
-  if(state.screen==='login') renderLogin();
-  else if(state.screen==='worker') renderWorker();
-  else if(state.screen==='daySummary') renderDaySummary();
+async function render(){
+  if(!configOk){ renderNeedsSetup(); return; }
+  app.innerHTML = '<div class="center-screen"><p class="muted">Loading…</p></div>';
+  if(state.screen==='login') await renderLogin();
+  else if(state.screen==='worker') await renderWorker();
+  else if(state.screen==='daySummary') await renderDaySummary();
   else if(state.screen==='adminLogin') renderAdminLogin();
-  else if(state.screen==='admin') renderAdmin();
+  else if(state.screen==='admin') await renderAdmin();
+}
+
+function renderNeedsSetup(){
+  app.innerHTML = `<div class="center-screen">
+    <h2 style="margin:0 0 8px;">Almost there</h2>
+    <p class="muted" style="max-width:340px;line-height:1.5;">This copy of Workeriser isn't connected to a shared database yet, so it can't sync between phones. Open the file and fill in the <b>firebaseConfig</b> values near the top of the &lt;script&gt; section — instructions are in the comment right above it.</p>
+  </div>`;
 }
 
 /* ================= LOGIN ================= */
-function renderLogin(){
+async function renderLogin(){
+  const dates = await Promise.all(WORKERS.map(w=>findAnyDateForWorker(w)));
+  app.innerHTML = '';
   const wrap = document.createElement('div');
   wrap.className = 'login-wrap';
   wrap.innerHTML = `
@@ -485,28 +549,27 @@ function renderLogin(){
   `;
   app.appendChild(wrap);
   const list = wrap.querySelector('#workerList');
-  WORKERS.forEach(w=>{
+  WORKERS.forEach((w,i)=>{
     const b = document.createElement('button');
     b.className = 'worker-btn';
-    const date = findAnyDateForWorker(w);
-    const jobs = date ? loadJobs(w,date) : null;
-    const sub = jobs ? `${jobs.length} job${jobs.length===1?'':'s'} loaded · ${date}` : 'No round loaded yet';
+    const date = dates[i];
+    const sub = date ? `Round loaded · ${date}` : 'No round loaded yet';
     b.innerHTML = `<div class="worker-avatar">${w[0]}</div>
       <div><div class="name">${w}</div><div class="sub">${sub}</div></div>
       <div class="chev">›</div>`;
     b.onclick = ()=> go('worker', { worker:w });
     list.appendChild(b);
   });
-  wrap.querySelector('#adminLink').onclick = ()=> go(getPassword() ? 'adminLogin' : 'admin', {setupMode: !getPassword()});
+  wrap.querySelector('#adminLink').onclick = ()=> go('adminLogin');
 }
 
 /* ================= WORKER JOB LIST ================= */
-function renderWorker(){
+async function renderWorker(){
   const worker = state.worker;
-  const date = state.date || findAnyDateForWorker(worker) || todayStr();
+  const date = state.date || await findAnyDateForWorker(worker) || todayStr();
   state.date = date;
-  const jobs = loadJobs(worker,date);
-  const prog = loadProgress(worker,date);
+  const [jobs, prog] = await Promise.all([loadJobs(worker,date), loadProgress(worker,date)]);
+  app.innerHTML = '';
 
   const header = document.createElement('div');
   header.className = 'topbar';
@@ -615,13 +678,13 @@ function renderJobCard(worker,date,job,prog){
   updateOwedAfter();
 
   card.querySelectorAll('.status-btn').forEach(btn=>{
-    btn.onclick = ()=>{
+    btn.onclick = async ()=>{
       const action = btn.dataset.action;
-      const prog2 = loadProgress(worker,date);
+      const prog2 = await loadProgress(worker,date);
       const current = prog2[job.id] || {status:'todo',payment:''};
       current.status = current.status === action ? 'todo' : action;
       prog2[job.id] = current;
-      saveProgress(worker,date,prog2);
+      await saveProgress(worker,date,prog2);
       if(action==='done' && current.status==='done'){
         card.classList.add('status-done');
         const wipe = card.querySelector('.wipe');
@@ -632,27 +695,24 @@ function renderJobCard(worker,date,job,prog){
   });
 
   const input = card.querySelector('.pay-row input');
-  input.addEventListener('input', ()=>{
+  input.addEventListener('input', async ()=>{
     updateOwedAfter();
-    const prog2 = loadProgress(worker,date);
+    const prog2 = await loadProgress(worker,date);
     const current = prog2[job.id] || {status:'todo',payment:''};
     current.payment = input.value;
     prog2[job.id] = current;
-    saveProgress(worker,date,prog2);
+    await saveProgress(worker,date,prog2);
   });
 
   return card;
 }
 
-function escapeHtml(str){
-  return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
-}
-
 /* ================= DAY SUMMARY (worker-facing) ================= */
-function renderDaySummary(){
+async function renderDaySummary(){
   const {worker,date} = state;
-  const jobs = loadJobs(worker,date) || [];
-  const prog = loadProgress(worker,date);
+  const [jobsRaw, prog] = await Promise.all([loadJobs(worker,date), loadProgress(worker,date)]);
+  const jobs = jobsRaw || [];
+  app.innerHTML = '';
 
   const header = document.createElement('div');
   header.className = 'topbar';
@@ -762,6 +822,7 @@ function downloadReportCSV(worker,date,rows){
 
 /* ================= ADMIN LOGIN ================= */
 function renderAdminLogin(){
+  app.innerHTML = '';
   const wrap = document.createElement('div');
   wrap.className = 'center-screen';
   wrap.innerHTML = `
@@ -778,8 +839,9 @@ function renderAdminLogin(){
   `;
   app.appendChild(wrap);
   const input = wrap.querySelector('#pwInput');
-  wrap.querySelector('#pwGo').onclick = ()=>{
-    if(input.value === getPassword()) go('admin');
+  wrap.querySelector('#pwGo').onclick = async ()=>{
+    const correct = await getPassword();
+    if(input.value === correct) go('admin');
     else { toast('Wrong password'); input.value=''; input.focus(); }
   };
   input.addEventListener('keydown', e=>{ if(e.key==='Enter') wrap.querySelector('#pwGo').click(); });
@@ -787,8 +849,8 @@ function renderAdminLogin(){
 }
 
 /* ================= ADMIN AREA ================= */
-function renderAdmin(){
-  const setupMode = !getPassword();
+async function renderAdmin(){
+  app.innerHTML = '';
   const header = document.createElement('div');
   header.className = 'topbar';
   header.innerHTML = `<div class="topbar-row">
@@ -803,11 +865,6 @@ function renderAdmin(){
   main.className = 'main';
   app.appendChild(main);
 
-  if(setupMode){
-    renderAdminSetup(main);
-    return;
-  }
-
   const tab = state.adminTab || 'upload';
   const tabs = document.createElement('div');
   tabs.className = 'tab-row';
@@ -820,31 +877,12 @@ function renderAdmin(){
   });
   main.appendChild(tabs);
 
-  if(tab==='upload') renderAdminUpload(main);
+  if(tab==='upload') await renderAdminUpload(main);
   else if(tab==='report') renderAdminReport(main);
   else renderAdminSettings(main);
 }
 
-function renderAdminSetup(main){
-  const card = document.createElement('div');
-  card.className = 'card pad';
-  card.innerHTML = `
-    <div class="section-title">Set an office password</div>
-    <p class="muted" style="font-size:13px;margin-top:-4px;">This just keeps casual browsers out — it isn't high security.</p>
-    <div class="field" style="margin-top:12px;"><label>New password</label><input type="password" id="newPw"></div>
-    <button class="btn btn-primary btn-block" id="setPwBtn" style="margin-top:14px;">Save password</button>
-  `;
-  main.appendChild(card);
-  card.querySelector('#setPwBtn').onclick = ()=>{
-    const v = card.querySelector('#newPw').value;
-    if(!v){ toast('Enter a password'); return; }
-    setPassword(v);
-    toast('Password set');
-    go('admin');
-  };
-}
-
-function renderAdminUpload(main){
+async function renderAdminUpload(main){
   const card = document.createElement('div');
   card.className = 'card pad';
   const options = WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
@@ -860,6 +898,11 @@ function renderAdminUpload(main){
   `;
   main.appendChild(card);
 
+  card.querySelector('#uWorker').addEventListener('change', ()=>{
+    card.querySelector('#uFile').value = '';
+    card.querySelector('#uStatus').innerHTML = '';
+  });
+
   card.querySelector('#uGo').onclick = ()=>{
     const worker = card.querySelector('#uWorker').value;
     const date = card.querySelector('#uDate').value || todayStr();
@@ -867,13 +910,13 @@ function renderAdminUpload(main){
     const file = fileInput.files[0];
     if(!file){ toast('Choose a CSV file first'); return; }
     const reader = new FileReader();
-    reader.onload = (e)=>{
+    reader.onload = async (e)=>{
       try{
         const rows = parseCSV(e.target.result);
         const jobs = rowsToJobs(rows);
         if(!jobs.length){ toast('No rows found in that file'); return; }
-        const missing = resolveCoordinates(jobs);
-        saveJobs(worker,date,jobs);
+        const missing = await resolveCoordinates(jobs);
+        await saveJobs(worker,date,jobs);
         let msg = `Loaded <b>${jobs.length}</b> jobs for <b>${worker}</b> on <b>${date}</b>.`;
         if(missing.length){
           msg += `<br><br>⚠ ${missing.length} address${missing.length===1?'':'es'} couldn't be matched to coordinates:<br>` +
@@ -885,6 +928,7 @@ function renderAdminUpload(main){
         card.querySelector('#uStatus').innerHTML = `<div class="note-box" style="margin-top:6px;">${msg}</div>`;
         toast(missing.length ? `Loaded ${jobs.length} jobs, ${missing.length} missing coordinates` : `Loaded ${jobs.length} jobs for ${worker}`);
       }catch(err){
+        console.error(err);
         toast('Could not read that CSV');
       }
     };
@@ -897,9 +941,12 @@ function renderAdminUpload(main){
   existing.innerHTML = `<div class="section-title">Currently loaded rounds</div>`;
   const listEl = document.createElement('div');
   listEl.className = 'stack';
-  WORKERS.forEach(w=>{
-    const d = findAnyDateForWorker(w);
-    const jobs = d ? loadJobs(w,d) : null;
+  const rows = await Promise.all(WORKERS.map(async w=>{
+    const d = await findAnyDateForWorker(w);
+    const jobs = d ? await loadJobs(w,d) : null;
+    return { w, d, jobs };
+  }));
+  rows.forEach(({w,d,jobs})=>{
     const row = document.createElement('div');
     row.style.cssText = 'display:flex;justify-content:space-between;font-size:13.5px;padding:8px 0;border-bottom:1px solid var(--line);';
     row.innerHTML = `<span><b>${w}</b></span><span class="muted">${jobs ? `${jobs.length} jobs · ${d}` : 'nothing loaded'}</span>`;
@@ -911,7 +958,7 @@ function renderAdminUpload(main){
   const coordCard = document.createElement('div');
   coordCard.className = 'card pad';
   coordCard.style.marginTop = '14px';
-  const lookup = loadCoordLookup();
+  const lookup = await loadCoordLookup();
   const addrCount = Object.keys(lookup.addresses).length;
   coordCard.innerHTML = `
     <div class="section-title">Coordinate reference</div>
@@ -927,17 +974,17 @@ function renderAdminUpload(main){
     const file = coordCard.querySelector('#cFile').files[0];
     if(!file){ toast('Choose a CSV file first'); return; }
     const reader = new FileReader();
-    reader.onload = (e)=>{
+    reader.onload = async (e)=>{
       try{
         const rows = parseCSV(e.target.result);
         const addresses = buildCoordAddresses(rows);
         const count = Object.keys(addresses).length;
         if(!count){ toast('No coordinates found in that file'); return; }
-        saveCoordLookup({ updatedAt: new Date().toLocaleDateString('en-GB'), addresses });
-        const { fixed, stillMissing } = rescanAllRoundsForCoords();
+        await saveCoordLookup({ updatedAt: new Date().toLocaleDateString('en-GB'), addresses });
+        const { fixed, stillMissing } = await rescanAllRoundsForCoords();
         coordCard.querySelector('#cStatus').innerHTML = `<div class="note-box" style="margin-top:8px;">Saved ${count} addresses.${fixed ? ` Filled in coordinates for ${fixed} already-loaded job${fixed===1?'':'s'}.` : ''}${stillMissing ? ` ${stillMissing} job${stillMissing===1?'':'s'} still missing — check the address spelling matches.` : ''}</div>`;
         toast('Coordinate reference updated');
-      }catch(err){ toast('Could not read that CSV'); }
+      }catch(err){ console.error(err); toast('Could not read that CSV'); }
     };
     reader.readAsText(file);
   };
@@ -958,13 +1005,13 @@ function renderAdminReport(main){
   `;
   main.appendChild(card);
 
-  function showReport(){
+  async function showReport(){
     const worker = card.querySelector('#rWorker').value;
     const date = card.querySelector('#rDate').value;
-    const jobs = loadJobs(worker,date);
+    const jobs = await loadJobs(worker,date);
     const out = card.querySelector('#rOut');
     if(!jobs){ out.innerHTML = `<p class="muted">No round loaded for ${worker} on ${date}.</p>`; return; }
-    const prog = loadProgress(worker,date);
+    const prog = await loadProgress(worker,date);
     let collected=0, outstanding=0;
     const rows = jobs.slice().sort((a,b)=>a.order-b.order).map(j=>{
       const p = prog[j.id] || {status:'todo',payment:0};
@@ -993,16 +1040,17 @@ function renderAdminSettings(main){
   card.className = 'card pad';
   card.innerHTML = `
     <div class="section-title">Change office password</div>
-    <div class="stack">
+    <p class="muted" style="font-size:12.5px;margin-top:-4px;">This is shared — changing it updates the password required on every phone, not just this one.</p>
+    <div class="stack" style="margin-top:10px;">
       <div class="field"><label>New password</label><input type="password" id="newPw2"></div>
       <button class="btn btn-primary btn-block" id="changePwBtn">Update password</button>
     </div>
   `;
   main.appendChild(card);
-  card.querySelector('#changePwBtn').onclick = ()=>{
+  card.querySelector('#changePwBtn').onclick = async ()=>{
     const v = card.querySelector('#newPw2').value;
     if(!v){ toast('Enter a password'); return; }
-    setPassword(v);
+    await setPassword(v);
     toast('Password updated');
   };
 
@@ -1011,7 +1059,7 @@ function renderAdminSettings(main){
   wipe.style.marginTop = '14px';
   wipe.innerHTML = `
     <div class="section-title">Storage</div>
-    <p class="muted" style="font-size:13px;margin-top:-4px;">Everything is stored only in this browser, on this device. Nothing is sent anywhere.</p>
+    <p class="muted" style="font-size:13px;margin-top:-4px;line-height:1.5;">Round data, cash taken, and job statuses are stored in a shared Firebase database, so any phone with this app open can see the same information. The office password is just a screen in this app, not real access control — anyone with the Firebase project details could still reach the data directly, so don't put anything highly sensitive in here.</p>
   `;
   main.appendChild(wipe);
 }
