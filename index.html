@@ -358,7 +358,7 @@ async function fsSet(key, value){
 }
 
 /* ================= CONFIG / STORAGE ================= */
-const WORKERS = ['Jim','Vlado','Shane','Simon','Lily'];
+const WORKERS = ['Simon','Jim','Lily','Shane','Vlado'];
 // Required whenever the office area hasn't had a custom password set for this
 // shared database. Visible to anyone who views the page source — this is a
 // "keep casual browsers out" lock, not real security.
@@ -502,7 +502,7 @@ function navUrl(job){
 }
 
 /* ---- coordinate reference lookup (address -> lat/lon), updated occasionally ---- */
-async function loadCoordLookup(){ return (await fsGet('coord_lookup')) || { updatedAt:null, addresses:{} }; }
+async function loadCoordLookup(){ return (await fsGet('coord_lookup')) || { updatedAt:null, addresses:{}, roundOrder:[] }; }
 async function saveCoordLookup(lookup){ await fsSet('coord_lookup', lookup); }
 
 function normAddr(a){
@@ -521,6 +521,20 @@ function buildCoordAddresses(rows){
     }
   });
   return addresses;
+}
+
+// the order rounds first appear in the reference CSV is treated as the canonical round sequence
+function buildRoundOrder(rows){
+  const order = [];
+  const seen = new Set();
+  rows.forEach(r=>{
+    const round = pick(r,['Round']);
+    if(round && !seen.has(round)){
+      seen.add(round);
+      order.push(round);
+    }
+  });
+  return order;
 }
 
 function findCoordsForAddress(address, lookup){
@@ -1245,9 +1259,9 @@ async function renderAdminUpload(main){
   const addrCount = Object.keys(lookup.addresses).length;
   coordCard.innerHTML = `
     <div class="section-title">Coordinate reference</div>
-    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">Upload your "active / next due" export occasionally to keep GPS coordinates on file. Daily round CSVs don't carry coordinates themselves — addresses are matched against this list automatically whenever you load a round above.</p>
+    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">Upload your "active, sorted by round order" export occasionally to keep GPS coordinates and round order on file. Daily round CSVs don't carry this themselves — addresses are matched against this list automatically whenever you load a round above.</p>
     <div class="note-box" style="margin:10px 0;">${addrCount ? `${addrCount} addresses on file${lookup.updatedAt ? ` · updated ${lookup.updatedAt}` : ''}` : 'No coordinate reference uploaded yet'}</div>
-    <div class="field"><label>Active / next-due CSV</label><input type="file" id="cFile" accept=".csv"></div>
+    <div class="field"><label>active-round-order...csv</label><input type="file" id="cFile" accept=".csv"></div>
     <button class="btn btn-ghost btn-block" id="cGo" style="margin-top:10px;">Update coordinates</button>
     <div id="cStatus"></div>
   `;
@@ -1261,9 +1275,10 @@ async function renderAdminUpload(main){
       try{
         const rows = parseCSV(e.target.result);
         const addresses = buildCoordAddresses(rows);
+        const roundOrder = buildRoundOrder(rows);
         const count = Object.keys(addresses).length;
         if(!count){ toast('No coordinates found in that file'); return; }
-        await saveCoordLookup({ updatedAt: new Date().toLocaleDateString('en-GB'), addresses });
+        await saveCoordLookup({ updatedAt: new Date().toLocaleDateString('en-GB'), addresses, roundOrder });
         const { fixed, stillMissing } = await rescanAllRoundsForCoords();
         coordCard.querySelector('#cStatus').innerHTML = `<div class="note-box" style="margin-top:8px;">Saved ${count} addresses.${fixed ? ` Filled in coordinates for ${fixed} already-loaded job${fixed===1?'':'s'}.` : ''}${stillMissing ? ` ${stillMissing} job${stillMissing===1?'':'s'} still missing — check the address spelling matches.` : ''}</div>`;
         toast('Coordinate reference updated');
@@ -1318,6 +1333,18 @@ function renderAdminReport(main){
         });
       });
       if(!totalJobs){ out.innerHTML = `<p class="muted">No rounds loaded for ${date} yet.</p>`; return; }
+      const lookup = await loadCoordLookup();
+      const roundOrder = lookup.roundOrder || [];
+      function roundRank(roundName){
+        const idx = roundOrder.indexOf(roundName);
+        return idx === -1 ? Infinity : idx;
+      }
+      allRows.sort((a,b)=>{
+        const ra = roundRank(a.job.round), rb = roundRank(b.job.round);
+        if(ra !== rb) return ra - rb;
+        if(a.job.round !== b.job.round) return (a.job.round||'').localeCompare(b.job.round||'');
+        return a.job.order - b.job.order;
+      });
       const completeRows = allRows.filter(r=>r.status!=='todo');
       out.innerHTML = `
         <table class="report">
