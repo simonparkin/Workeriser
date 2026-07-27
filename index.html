@@ -128,6 +128,24 @@
   .job-card.status-done{border-color:#bfe3cd;background:var(--green-bg);}
   .job-card.status-skipped{border-color:#e6dab8;background:#fbf3e0;}
   .job-card.status-cancelled{border-color:#f0c9c9;background:var(--red-bg);opacity:.75;}
+  .job-card.selectable{padding-left:44px;}
+  .job-select-checkbox{
+    position:absolute;top:16px;left:14px;width:20px;height:20px;z-index:5;accent-color:var(--navy);
+  }
+
+  .move-bar{
+    background:var(--navy-deep);border-radius:var(--radius);
+    padding:12px 14px;margin-bottom:16px;
+    display:flex;flex-direction:column;gap:10px;
+  }
+  .move-bar-label{color:#cfdce5;font-size:12.5px;font-weight:600;}
+  .move-bar-targets{display:flex;gap:8px;flex-wrap:wrap;}
+  .move-target-btn{
+    background:var(--amber);color:var(--navy-deep);border:none;border-radius:20px;
+    padding:8px 14px;font-weight:700;font-size:13px;cursor:pointer;
+  }
+  .move-target-btn:active{background:var(--amber-deep);color:#fff;}
+  .move-target-btn:disabled{opacity:.6;}
 
   .job-top{display:flex;justify-content:space-between;gap:10px;}
   .job-info .addr{font-weight:700;font-size:15.5px;line-height:1.3;color:var(--ink);}
@@ -340,7 +358,7 @@ async function fsSet(key, value){
 }
 
 /* ================= CONFIG / STORAGE ================= */
-const WORKERS = ['Jim','Vlado','Shane'];
+const WORKERS = ['Jim','Vlado','Shane','Simon','Lily'];
 // Required whenever the office area hasn't had a custom password set for this
 // shared database. Visible to anyone who views the page source — this is a
 // "keep casual browsers out" lock, not real security.
@@ -375,6 +393,38 @@ async function saveProgress(worker,date,prog){ await fsSet(`progress_${worker}_$
 async function findAnyDateForWorker(worker){
   const meta = await getMeta();
   return meta.lastDate[worker] || null;
+}
+
+// moves a set of jobs (by id) from one worker's round to another's, for the same date,
+// carrying over any progress (payment/price/note) already recorded against them
+async function moveJobsToWorker(fromWorker, toWorker, date, jobIds){
+  const [fromJobs, fromProg, toJobsRaw, toProgRaw] = await Promise.all([
+    loadJobs(fromWorker,date),
+    loadProgress(fromWorker,date),
+    loadJobs(toWorker,date),
+    loadProgress(toWorker,date)
+  ]);
+  const idSet = new Set(jobIds);
+  const source = fromJobs || [];
+  const moving = source.filter(j=>idSet.has(j.id));
+  const remaining = source.filter(j=>!idSet.has(j.id));
+  const toJobs = toJobsRaw || [];
+  const toProg = toProgRaw || {};
+  let nextOrder = toJobs.length ? Math.max(...toJobs.map(j=>j.order)) + 1 : 0;
+  moving.forEach(j=>{
+    j.order = nextOrder++;
+    toJobs.push(j);
+    if(fromProg[j.id]){
+      toProg[j.id] = fromProg[j.id];
+      delete fromProg[j.id];
+    }
+  });
+  await Promise.all([
+    saveJobs(fromWorker, date, remaining),
+    saveJobs(toWorker, date, toJobs),
+    saveProgress(fromWorker, date, fromProg),
+    saveProgress(toWorker, date, toProg)
+  ]);
 }
 
 /* ================= CSV PARSING ================= */
@@ -529,6 +579,21 @@ async function rescanAllRoundsForCoords(){
 let state = { screen:'login' };
 const app = document.getElementById('app');
 
+// Delays a job card's move into/out of the Completed section for 5s after the
+// last interaction with that card, so cash/price/note edits can still happen
+// without the card jumping away underneath the user.
+const cardTimers = new Map();
+function scheduleReflow(jobId, worker, date){
+  if(cardTimers.has(jobId)) clearTimeout(cardTimers.get(jobId));
+  const t = setTimeout(()=>{
+    cardTimers.delete(jobId);
+    if(state.screen==='worker' && state.worker===worker && state.date===date){
+      render();
+    }
+  }, 5000);
+  cardTimers.set(jobId, t);
+}
+
 function go(screen, extra){ state = Object.assign({screen}, extra); render(); }
 
 function toast(msg){
@@ -622,8 +687,6 @@ async function renderWorker(){
 
   const header = document.createElement('div');
   header.className = 'topbar';
-  const doneCount = jobs ? jobs.filter(j=>prog[j.id] && prog[j.id].status==='done').length : 0;
-  const collected = jobs ? jobs.reduce((s,j)=> s + (prog[j.id]?.payment ? parseFloat(prog[j.id].payment)||0 : 0), 0) : 0;
   header.innerHTML = `
     <div class="topbar-row">
       <div class="brand">
@@ -631,8 +694,9 @@ async function renderWorker(){
         <div class="brand-text"><div class="t1">Round · ${date}</div><div class="t2">${worker}</div></div>
       </div>
       <button class="topbar-btn" id="switchBtn">Switch</button>
+      ${worker==='Simon' ? `<button class="topbar-btn" id="selectBtn" style="margin-left:8px;">Select</button>` : ''}
     </div>
-    ${jobs ? `<div class="topbar-sub"><span>${doneCount}/${jobs.length} done</span><span>Collected <b>${money(collected)}</b></span></div>` : ''}
+    ${jobs && jobs.length ? `<div class="topbar-sub"><span id="topDoneStat"></span><span>Collected <b id="topCollectedStat"></b></span></div>` : ''}
   `;
   app.appendChild(header);
   header.querySelector('#switchBtn').onclick = ()=> go('login');
@@ -641,16 +705,35 @@ async function renderWorker(){
   main.className = 'main';
   app.appendChild(main);
 
+  const moveBarContainer = document.createElement('div');
+  main.appendChild(moveBarContainer);
+
   if(!jobs || !jobs.length){
     main.innerHTML = `<div class="empty-state">No round has been loaded for ${worker} yet.<br>Ask the office to upload today's job list.</div>`;
     return;
+  }
+
+  const bar = document.createElement('div');
+
+  function refreshStats(){
+    const doneCount = jobs.filter(j=>prog[j.id] && prog[j.id].status==='done').length;
+    const collected = jobs.reduce((s,j)=> s + (prog[j.id]?.payment ? parseFloat(prog[j.id].payment)||0 : 0), 0);
+    const remaining = jobs.length - jobs.filter(j=>prog[j.id] && prog[j.id].status!=='todo').length;
+    const doneStat = header.querySelector('#topDoneStat');
+    if(doneStat) doneStat.textContent = `${doneCount}/${jobs.length} done`;
+    const collectedStat = header.querySelector('#topCollectedStat');
+    if(collectedStat) collectedStat.textContent = money(collected);
+    const leftEl = bar.querySelector('#leftStatN');
+    if(leftEl) leftEl.textContent = remaining;
+    const collEl = bar.querySelector('#collectedStatN');
+    if(collEl) collEl.textContent = money(collected);
   }
 
   const sorted = jobs.slice().sort((a,b)=>a.order-b.order);
   const todoJobs = sorted.filter(j=> !prog[j.id] || prog[j.id].status==='todo');
   const completedJobs = sorted.filter(j=> prog[j.id] && prog[j.id].status!=='todo');
 
-  function renderGroup(list){
+  function renderGroup(list, onCard){
     let lastRound = null;
     list.forEach(job=>{
       if(job.round && job.round !== lastRound){
@@ -660,11 +743,14 @@ async function renderWorker(){
         main.appendChild(rl);
         lastRound = job.round;
       }
-      main.appendChild(renderJobCard(worker,date,job,prog));
+      const card = renderJobCard(worker,date,job,prog,refreshStats);
+      main.appendChild(card);
+      if(onCard) onCard(job, card);
     });
   }
 
-  renderGroup(todoJobs);
+  const todoCardMap = new Map();
+  renderGroup(todoJobs, (job,card)=>{ todoCardMap.set(job.id, card); });
 
   if(completedJobs.length){
     const divider = document.createElement('div');
@@ -675,19 +761,80 @@ async function renderWorker(){
   }
 
   // footer summary / finish
-  const bar = document.createElement('div');
   bar.className = 'summary-bar';
-  const remaining = jobs.length - doneCount - jobs.filter(j=>prog[j.id] && (prog[j.id].status==='skipped'||prog[j.id].status==='cancelled')).length;
+  const doneCount = jobs.filter(j=>prog[j.id] && prog[j.id].status==='done').length;
+  const collected = jobs.reduce((s,j)=> s + (prog[j.id]?.payment ? parseFloat(prog[j.id].payment)||0 : 0), 0);
+  const remaining = jobs.length - jobs.filter(j=>prog[j.id] && prog[j.id].status!=='todo').length;
   bar.innerHTML = `
-    <div class="sum-pill"><div class="n">${remaining}</div><div class="l">Left</div></div>
-    <div class="sum-pill"><div class="n">${money(collected)}</div><div class="l">Collected</div></div>
+    <div class="sum-pill"><div class="n" id="leftStatN">${remaining}</div><div class="l">Left</div></div>
+    <div class="sum-pill"><div class="n" id="collectedStatN">${money(collected)}</div><div class="l">Collected</div></div>
     <button class="finish-btn" id="finishBtn">Day summary</button>
   `;
   app.appendChild(bar);
   bar.querySelector('#finishBtn').onclick = ()=> go('daySummary',{worker,date});
+
+  const selectBtn = header.querySelector('#selectBtn');
+  if(selectBtn){
+    let selectMode = false;
+    const selectedIds = new Set();
+
+    function renderMoveBar(){
+      moveBarContainer.innerHTML = '';
+      if(!selectMode || selectedIds.size===0) return;
+      const others = WORKERS.filter(w=>w!==worker);
+      const mb = document.createElement('div');
+      mb.className = 'move-bar';
+      mb.innerHTML = `
+        <div class="move-bar-label">${selectedIds.size} selected — send to</div>
+        <div class="move-bar-targets">
+          ${others.map(w=>`<button type="button" class="move-target-btn" data-target="${escapeHtml(w)}">${escapeHtml(w)}</button>`).join('')}
+        </div>
+      `;
+      moveBarContainer.appendChild(mb);
+      mb.querySelectorAll('.move-target-btn').forEach(btn=>{
+        btn.onclick = async ()=>{
+          const target = btn.dataset.target;
+          const ids = Array.from(selectedIds);
+          btn.disabled = true;
+          await moveJobsToWorker(worker, target, date, ids);
+          toast(`Moved ${ids.length} job${ids.length===1?'':'s'} to ${target}`);
+          render();
+        };
+      });
+    }
+
+    selectBtn.onclick = ()=>{
+      selectMode = !selectMode;
+      selectBtn.textContent = selectMode ? 'Cancel' : 'Select';
+      selectedIds.clear();
+      todoCardMap.forEach((card,jobId)=>{
+        let cb = card.querySelector('.job-select-checkbox');
+        if(selectMode){
+          card.classList.add('selectable');
+          if(!cb){
+            cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.className = 'job-select-checkbox';
+            cb.addEventListener('change', ()=>{
+              if(cb.checked) selectedIds.add(jobId); else selectedIds.delete(jobId);
+              renderMoveBar();
+            });
+            card.appendChild(cb);
+          }
+          cb.checked = false;
+        } else {
+          card.classList.remove('selectable');
+          if(cb) cb.remove();
+        }
+      });
+      renderMoveBar();
+    };
+  }
+
+  refreshStats();
 }
 
-function renderJobCard(worker,date,job,prog){
+function renderJobCard(worker,date,job,prog,refreshStats){
   const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'' };
   const card = document.createElement('div');
   card.className = `card job-card status-${p.status}`;
@@ -726,7 +873,7 @@ function renderJobCard(worker,date,job,prog){
     </div>
     <div class="pay-row">
       <div class="pay-field">
-        <label>Cash taken</label>
+        <label>Cash paid</label>
         <div class="pay-input-wrap"><span class="pfx">£</span><input type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${p.payment || ''}" class="pay-input"></div>
       </div>
       <div class="pay-field">
@@ -756,11 +903,10 @@ function renderJobCard(worker,date,job,prog){
   updateOwedAfter();
 
   async function persist(mutator){
-    const prog2 = await loadProgress(worker,date);
-    const current = prog2[job.id] || {status:'todo',payment:'',price:'',note:''};
+    const current = prog[job.id] ? Object.assign({}, prog[job.id]) : {status:'todo',payment:'',price:'',note:''};
     mutator(current);
-    prog2[job.id] = current;
-    await saveProgress(worker,date,prog2);
+    prog[job.id] = current;
+    await saveProgress(worker,date,prog);
   }
 
   card.querySelectorAll('.status-btn').forEach(btn=>{
@@ -771,12 +917,15 @@ function renderJobCard(worker,date,job,prog){
         newStatus = current.status === action ? 'todo' : action;
         current.status = newStatus;
       });
+      card.className = `card job-card status-${newStatus}`;
+      card.querySelectorAll('.status-btn').forEach(b=>b.classList.remove('active-done','active-skipped','active-cancelled'));
+      if(newStatus !== 'todo') btn.classList.add(`active-${newStatus}`);
       if(action==='done' && newStatus==='done'){
-        card.classList.add('status-done');
         const wipe = card.querySelector('.wipe');
         wipe.classList.add('play');
       }
-      render();
+      if(refreshStats) refreshStats();
+      scheduleReflow(job.id, worker, date);
     };
   });
 
@@ -792,6 +941,7 @@ function renderJobCard(worker,date,job,prog){
     updateOwedAfter();
     updateFrontButton();
     persist(current=>{ current.price = priceInput.value; });
+    scheduleReflow(job.id, worker, date);
   });
   priceInput.addEventListener('blur', ()=>{
     if(priceInput.value !== ''){
@@ -799,6 +949,7 @@ function renderJobCard(worker,date,job,prog){
       updateOwedAfter();
       updateFrontButton();
       persist(current=>{ current.price = priceInput.value; });
+      scheduleReflow(job.id, worker, date);
     }
   });
 
@@ -808,15 +959,19 @@ function renderJobCard(worker,date,job,prog){
     updateOwedAfter();
     updateFrontButton();
     persist(current=>{ current.price = priceInput.value; });
+    scheduleReflow(job.id, worker, date);
   };
 
   payInput.addEventListener('input', ()=>{
     updateOwedAfter();
     persist(current=>{ current.payment = payInput.value; });
+    if(refreshStats) refreshStats();
+    scheduleReflow(job.id, worker, date);
   });
 
   card.querySelector('.note-field textarea').addEventListener('input', (e)=>{
     persist(current=>{ current.note = e.target.value; });
+    scheduleReflow(job.id, worker, date);
   });
 
   return card;
