@@ -309,6 +309,7 @@
   .badge-cancelled{background:var(--red-bg);color:var(--red);}
   .badge-todo{background:var(--slate-bg);color:var(--ink-soft);}
   .badge-front{background:var(--amber-deep);color:#fff;}
+  .badge-new{background:var(--blue);color:#fff;}
 
   .toast{
     position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
@@ -748,6 +749,30 @@ function statusLabel(status){
   return status === 'todo' ? 'Not done' : status;
 }
 
+// shared "new customers to add to Aworka" summary, used across all report views
+function renderNewCustomerSection(rows){
+  const newRows = rows.filter(r => r.job.isNewCustomer);
+  if(!newRows.length) return '';
+  return `
+    <div class="card pad" style="margin-top:14px;border:1.5px solid var(--blue);">
+      <div class="section-title" style="color:var(--blue);">New customers to add to Aworka</div>
+      ${newRows.map(r=>{
+        const j = r.job;
+        const name = [j.title, j.firstName, j.lastName].filter(Boolean).join(' ') || '(name not given)';
+        return `
+          <div style="padding:10px 0;border-bottom:1px solid var(--line);font-size:13px;line-height:1.6;">
+            <b>${escapeHtml(name)}</b>${r.worker ? ` <span class="muted">(${escapeHtml(r.worker)})</span>` : ''} — ${escapeHtml(j.address)}<br>
+            Price: ${money(j.price)} · Frequency: ${escapeHtml(j.frequency||'—')} · Status: ${statusLabel(r.status)}<br>
+            ${j.email ? `Email: ${escapeHtml(j.email)}<br>` : ''}
+            ${j.needsGateText ? `Needs gate text · Phone: ${escapeHtml(j.phone||'—')}<br>` : (j.phone ? `Phone: ${escapeHtml(j.phone)}<br>` : '')}
+            ${j.notes ? `Notes: ${escapeHtml(j.notes)}` : ''}
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
 /* ================= RENDER ROUTER ================= */
 let lastScreenRendered = null;
 async function render(){
@@ -764,6 +789,7 @@ async function render(){
   else if(state.screen==='daySummary') await renderDaySummary();
   else if(state.screen==='adminLogin') renderAdminLogin();
   else if(state.screen==='admin') await renderAdmin();
+  else if(state.screen==='newCustomer') await renderNewCustomer();
   if(sameScreen) window.scrollTo(0, savedScroll);
 }
 
@@ -828,12 +854,14 @@ async function renderWorker(){
         <div class="brand-text"><div class="t1">Job list · ${date}</div><div class="t2">${worker}</div></div>
       </div>
       <button class="topbar-btn" id="switchBtn">Switch</button>
+      <button class="topbar-btn" id="newCustBtn" style="margin-left:8px;">New</button>
       ${worker==='Simon' ? `<button class="topbar-btn" id="selectBtn" style="margin-left:8px;">Select</button>` : ''}
     </div>
     ${jobs && jobs.length ? `<div class="topbar-sub"><span id="topDoneStat"></span><span>Collected <b id="topCollectedStat"></b></span></div>` : ''}
   `;
   app.appendChild(header);
   header.querySelector('#switchBtn').onclick = ()=> go('login');
+  header.querySelector('#newCustBtn').onclick = ()=> go('newCustomer', {worker, date, fromScreen:'worker'});
 
   const main = document.createElement('div');
   main.className = 'main';
@@ -1022,7 +1050,7 @@ function renderJobCard(worker,date,job,prog,refreshStats){
     <div class="wipe"></div>
     <div class="job-top">
       <div class="job-info">
-        <div class="addr">${escapeHtml(job.address)}</div>
+        <div class="addr">${job.isNewCustomer ? '<span class="badge badge-new">NEW</span> ' : ''}${escapeHtml(job.address)}</div>
         <div class="cust-row">
           <span class="cust">${escapeHtml(job.customer)}</span>
           ${job.phone ? `<a class="phone-btn" href="${telHref}">
@@ -1171,6 +1199,168 @@ function renderJobCard(worker,date,job,prog,refreshStats){
 }
 
 /* ================= DAY SUMMARY (worker-facing) ================= */
+/* ================= NEW CUSTOMER ================= */
+async function renderNewCustomer(){
+  const { worker, date } = state;
+  const fromScreen = state.fromScreen || 'worker';
+  app.innerHTML = '';
+
+  const header = document.createElement('div');
+  header.className = 'topbar';
+  header.innerHTML = `<div class="topbar-row">
+      <div class="brand"><div class="brand-mark">+</div>
+      <div class="brand-text"><div class="t1">${escapeHtml(worker)} · ${date}</div><div class="t2">New customer</div></div></div>
+      <button class="topbar-btn" id="backBtn">Cancel</button>
+    </div>`;
+  app.appendChild(header);
+  header.querySelector('#backBtn').onclick = ()=> go(fromScreen, {worker, date});
+
+  const main = document.createElement('div');
+  main.className = 'main';
+  app.appendChild(main);
+
+  // work out a sensible round default from the next job still to do
+  const existingJobs = (await loadJobs(worker, date)) || [];
+  const sorted = existingJobs.slice().sort((a,b)=>a.order-b.order);
+  const existingProg = await loadProgress(worker, date);
+  const nextTodo = sorted.find(j => !existingProg[j.id] || existingProg[j.id].status==='todo');
+  const suggestedRound = (nextTodo && nextTodo.round) || (sorted.length ? sorted[sorted.length-1].round : '') || '';
+
+  const card = document.createElement('div');
+  card.className = 'card pad';
+  card.innerHTML = `
+    <div class="section-title">New customer</div>
+    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">This adds a job to today's list. Mark it Done/Skipped and take payment the same way as any other job — it'll show up in reports flagged for you to add to Aworka.</p>
+    <div class="stack" style="margin-top:12px;">
+      <div class="field"><label>Address *</label><input type="text" id="ncAddress" placeholder="e.g. 12 Example Street, Town"></div>
+      <div class="field"><label>Price *</label><input type="number" id="ncPrice" inputmode="decimal" min="0" step="0.01" placeholder="0.00"></div>
+      <div class="field"><label>Frequency *</label>
+        <select id="ncFrequency">
+          <option value="">Select…</option>
+          <option>Weekly</option>
+          <option>2-Weekly</option>
+          <option>4-Weekly</option>
+          <option value="Monthly">Monthly (4-Weekly)</option>
+          <option>8-Weekly</option>
+          <option>One-off</option>
+          <option value="__other">Other…</option>
+        </select>
+      </div>
+      <div class="field" id="ncFrequencyOtherWrap" style="display:none;"><label>Frequency (other)</label><input type="text" id="ncFrequencyOther" placeholder="e.g. 6-Weekly"></div>
+      <div class="field"><label>Round</label><input type="text" id="ncRound" value="${escapeHtml(suggestedRound)}" placeholder="Nearest round"></div>
+      <div class="note-box" id="ncGeoStatus">📍 Getting location…</div>
+
+      <div class="section-title" style="margin-top:6px;">Optional details</div>
+      <div class="field"><label>Title</label>
+        <select id="ncTitle">
+          <option value="">—</option>
+          <option>Mr</option><option>Mrs</option><option>Ms</option><option>Miss</option><option>Dr</option>
+        </select>
+      </div>
+      <div class="field"><label>First name</label><input type="text" id="ncFirst"></div>
+      <div class="field"><label>Last name</label><input type="text" id="ncLast"></div>
+      <div class="field"><label>Email</label><input type="email" id="ncEmail" placeholder="name@example.com"></div>
+      <label style="display:flex;align-items:center;gap:10px;font-size:13.5px;font-weight:600;color:var(--ink-soft);">
+        <input type="checkbox" id="ncGateText" style="width:18px;height:18px;accent-color:var(--navy);">
+        Needs a text the night before to open their gate
+      </label>
+      <div class="field" id="ncPhoneWrap" style="display:none;"><label>Phone number *</label><input type="tel" id="ncPhone" placeholder="07…"></div>
+      <div class="field"><label>Notes</label><textarea id="ncNotes" rows="2"></textarea></div>
+
+      <button class="btn btn-primary btn-block" id="ncSave" style="margin-top:6px;">Add to today's list</button>
+      <div id="ncError" style="color:var(--red);font-size:13px;font-weight:600;"></div>
+    </div>
+  `;
+  main.appendChild(card);
+
+  // auto-capture GPS location
+  let capturedLat = null, capturedLon = null;
+  const geoStatus = card.querySelector('#ncGeoStatus');
+  if('geolocation' in navigator){
+    navigator.geolocation.getCurrentPosition(
+      pos=>{
+        capturedLat = pos.coords.latitude;
+        capturedLon = pos.coords.longitude;
+        geoStatus.textContent = '📍 Location captured — Navigate will work for this job.';
+      },
+      err=>{
+        geoStatus.textContent = '📍 Could not get location — Navigate will fall back to searching the address.';
+      },
+      { timeout: 10000 }
+    );
+  } else {
+    geoStatus.textContent = '📍 Location not available on this device — Navigate will fall back to searching the address.';
+  }
+
+  const freqSelect = card.querySelector('#ncFrequency');
+  freqSelect.addEventListener('change', ()=>{
+    card.querySelector('#ncFrequencyOtherWrap').style.display = freqSelect.value==='__other' ? '' : 'none';
+  });
+
+  const gateCheck = card.querySelector('#ncGateText');
+  gateCheck.addEventListener('change', ()=>{
+    card.querySelector('#ncPhoneWrap').style.display = gateCheck.checked ? '' : 'none';
+  });
+
+  card.querySelector('#ncSave').onclick = async ()=>{
+    const errEl = card.querySelector('#ncError');
+    errEl.textContent = '';
+    const address = card.querySelector('#ncAddress').value.trim();
+    const price = parseFloat(card.querySelector('#ncPrice').value);
+    let frequency = freqSelect.value;
+    if(frequency === '__other') frequency = card.querySelector('#ncFrequencyOther').value.trim();
+    const round = card.querySelector('#ncRound').value.trim();
+    const title = card.querySelector('#ncTitle').value;
+    const firstName = card.querySelector('#ncFirst').value.trim();
+    const lastName = card.querySelector('#ncLast').value.trim();
+    const email = card.querySelector('#ncEmail').value.trim();
+    const needsGateText = gateCheck.checked;
+    const phone = card.querySelector('#ncPhone').value.trim();
+    const notes = card.querySelector('#ncNotes').value.trim();
+
+    if(!address){ errEl.textContent = 'Address is required.'; return; }
+    if(!price || price <= 0){ errEl.textContent = 'Enter a valid price.'; return; }
+    if(!frequency){ errEl.textContent = 'Frequency is required.'; return; }
+    if(needsGateText && !phone){ errEl.textContent = 'Phone number is needed for the gate text.'; return; }
+
+    const saveBtn = card.querySelector('#ncSave');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Adding…';
+
+    const customerName = [title, firstName, lastName].filter(Boolean).join(' ') || '(new customer)';
+    const jobs = (await loadJobs(worker, date)) || [];
+    const sameRound = jobs.filter(j=>round && j.round===round);
+    const order = sameRound.length
+      ? Math.max(...sameRound.map(j=>j.order)) + 0.5
+      : (jobs.length ? Math.max(...jobs.map(j=>j.order)) + 1 : 0);
+
+    const newJob = {
+      id: 'new_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7),
+      order,
+      customer: customerName,
+      address,
+      postcode: '',
+      phone,
+      lat: capturedLat,
+      lon: capturedLon,
+      round,
+      price,
+      frontPrice: Math.ceil(price/2 + 1),
+      balance: 0,
+      notes,
+      timeRequired: '',
+      frequency,
+      isNewCustomer: true,
+      title, firstName, lastName, email, needsGateText
+    };
+    jobs.push(newJob);
+    await saveJobs(worker, date, jobs);
+    toast('New customer added to the list');
+    go('worker', {worker, date});
+  };
+}
+
+
 async function renderDaySummary(){
   const {worker,date} = state;
   const [jobsRaw, prog] = await Promise.all([loadJobs(worker,date), loadProgress(worker,date)]);
@@ -1241,6 +1431,7 @@ async function renderDaySummary(){
     </table>
   `;
   main.appendChild(card2);
+  main.insertAdjacentHTML('beforeend', renderNewCustomerSection(rows));
 
   const btnRow = document.createElement('div');
   btnRow.className = 'stack';
@@ -1584,6 +1775,7 @@ function renderAdminReport(main){
           <tr><th>Worker</th><th>Address</th><th>Status</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Balance</th></tr>
           ${allRows.length ? allRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span></td>${chargedCell(r)}${paidCell(r)}${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="6" class="muted">No jobs yet.</td></tr>`}
         </table>
+        ${renderNewCustomerSection(allRows)}
         <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
       `;
       out.querySelector('#rCsv').onclick = ()=> downloadReportCSVMulti(date, allRows);
@@ -1622,6 +1814,7 @@ function renderAdminReport(main){
         <tr><th>Address</th><th>Status</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Balance</th></tr>
         ${rows.length ? rows.map(r=>`<tr><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span></td>${chargedCell(r)}${paidCell(r)}${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="5" class="muted">No jobs yet.</td></tr>`}
       </table>
+      ${renderNewCustomerSection(rows)}
       <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
     `;
     out.querySelector('#rCsv').onclick = ()=> downloadReportCSV(worker,date,rows);
