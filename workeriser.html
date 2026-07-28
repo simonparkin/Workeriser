@@ -1,0 +1,1614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Workeriser</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" sizes="32x32" href="icon-32.png">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="theme-color" content="#123a5e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Workeriser">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#eef2f4;
+    --surface:#ffffff;
+    --ink:#10202f;
+    --ink-soft:#516b7a;
+    --navy:#123a5e;
+    --navy-deep:#0a2540;
+    --amber:#f0a202;
+    --amber-deep:#c98600;
+    --green:#1f8a54;
+    --green-bg:#e5f4ec;
+    --red:#c23b3b;
+    --red-bg:#fbe9e9;
+    --slate:#8fa1ac;
+    --slate-bg:#eef1f2;
+    --line:#dbe3e7;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:'Inter',system-ui,sans-serif;
+    min-height:100vh;
+    -webkit-tap-highlight-color:transparent;
+  }
+  h1,h2,h3,.display{font-family:'Space Grotesk',system-ui,sans-serif;}
+  button{font-family:inherit;}
+  #app{max-width:560px;margin:0 auto;min-height:100vh;background:var(--bg);display:flex;flex-direction:column;}
+
+  /* ---------- header ---------- */
+  .topbar{
+    background:linear-gradient(160deg,var(--navy-deep),var(--navy));
+    color:#fff;
+    padding:18px 20px 16px;
+    position:sticky;top:0;z-index:20;
+  }
+  .topbar-row{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+  .brand{display:flex;align-items:center;gap:10px;}
+  .brand-mark{
+    width:34px;height:34px;border-radius:9px;
+    background:var(--amber);
+    display:flex;align-items:center;justify-content:center;
+    font-family:'Space Grotesk';font-weight:700;color:var(--navy-deep);font-size:15px;
+    flex:none;
+  }
+  .brand-text .t1{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#b9cbd8;font-weight:600;}
+  .brand-text .t2{font-size:18px;font-weight:700;line-height:1.1;}
+  .topbar-btn{
+    background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.18);color:#fff;
+    padding:7px 12px;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;
+  }
+  .topbar-btn:active{background:rgba(255,255,255,.22);}
+  .topbar-sub{margin-top:12px;display:flex;justify-content:space-between;align-items:baseline;color:#cfdce5;font-size:13px;}
+  .topbar-sub b{color:#fff;font-weight:700;}
+
+  /* ---------- generic ---------- */
+  .main{flex:1;padding:18px 16px 100px;}
+  .card{background:var(--surface);border-radius:var(--radius);box-shadow:0 1px 2px rgba(10,37,64,.06), 0 6px 18px rgba(10,37,64,.05);}
+  .center-screen{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 24px;text-align:center;}
+  .muted{color:var(--ink-soft);}
+  .stack{display:flex;flex-direction:column;gap:12px;}
+
+  /* ---------- login screen ---------- */
+  .login-wrap{flex:1;display:flex;flex-direction:column;justify-content:center;padding:32px 24px;}
+  .login-hero{text-align:center;margin-bottom:34px;}
+  .login-hero .glyph{
+    width:64px;height:64px;border-radius:16px;margin:0 auto 16px;
+    background:linear-gradient(160deg,var(--navy),var(--navy-deep));
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 8px 20px rgba(10,37,64,.25);
+  }
+  .login-hero h1{font-size:24px;margin:0 0 6px;color:var(--navy-deep);}
+  .login-hero p{margin:0;color:var(--ink-soft);font-size:14px;}
+  .worker-btn{
+    display:flex;align-items:center;gap:14px;
+    background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+    padding:16px 18px;cursor:pointer;text-align:left;width:100%;
+    box-shadow:0 1px 2px rgba(10,37,64,.05);
+  }
+  .worker-btn:active{background:#f4f7f8;}
+  .worker-avatar{
+    width:42px;height:42px;border-radius:50%;flex:none;
+    background:var(--amber);color:var(--navy-deep);
+    display:flex;align-items:center;justify-content:center;font-weight:700;font-family:'Space Grotesk';font-size:16px;
+  }
+  .worker-btn .name{font-weight:700;font-size:16px;}
+  .worker-btn .sub{font-size:12.5px;color:var(--ink-soft);margin-top:1px;}
+  .worker-btn .chev{margin-left:auto;color:var(--slate);}
+  .admin-link{
+    margin-top:26px;text-align:center;font-size:13px;color:var(--ink-soft);
+    text-decoration:underline;cursor:pointer;
+  }
+
+  /* ---------- job list ---------- */
+  .round-label{
+    font-family:'Space Grotesk';font-size:12.5px;font-weight:700;letter-spacing:.04em;
+    color:var(--navy);text-transform:uppercase;margin:22px 0 8px 2px;
+    display:flex;align-items:center;gap:8px;
+  }
+  .round-label:first-child{margin-top:2px;}
+  .round-label::after{content:"";flex:1;height:1px;background:var(--line);}
+
+  .completed-divider{
+    display:flex;align-items:center;gap:10px;
+    margin:26px 0 14px;color:var(--slate);
+  }
+  .completed-divider::before,.completed-divider::after{content:"";flex:1;height:1px;background:var(--line);}
+  .completed-divider span{
+    font-family:'Space Grotesk';font-size:11px;font-weight:700;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--ink-soft);white-space:nowrap;
+  }
+
+  .job-card{
+    padding:14px 14px 12px;margin-bottom:10px;position:relative;overflow:hidden;
+    border:1px solid var(--line);
+  }
+  .job-card.status-done{border-color:#bfe3cd;background:var(--green-bg);}
+  .job-card.status-skipped{border-color:#e6dab8;background:#fbf3e0;}
+  .job-card.status-cancelled{border-color:#f0c9c9;background:var(--red-bg);opacity:.75;}
+  .job-card.selectable{padding-left:44px;}
+  .job-select-checkbox{
+    position:absolute;top:16px;left:14px;width:20px;height:20px;z-index:5;accent-color:var(--navy);
+  }
+
+  .move-bar{
+    background:var(--navy-deep);border-radius:var(--radius);
+    padding:12px 14px;margin-bottom:16px;
+    display:flex;flex-direction:column;gap:10px;
+  }
+  .move-bar-label{color:#cfdce5;font-size:12.5px;font-weight:600;}
+  .move-bar-targets{display:flex;gap:8px;flex-wrap:wrap;}
+  .move-target-btn{
+    background:var(--amber);color:var(--navy-deep);border:none;border-radius:20px;
+    padding:8px 14px;font-weight:700;font-size:13px;cursor:pointer;
+  }
+  .move-target-btn:active{background:var(--amber-deep);color:#fff;}
+  .move-target-btn:disabled{opacity:.6;}
+  .undo-bar{background:var(--navy);}
+  .move-dismiss-btn{background:rgba(255,255,255,.14);color:#fff;}
+  .move-dismiss-btn:active{background:rgba(255,255,255,.24);}
+
+  .job-top{display:flex;justify-content:space-between;gap:10px;}
+  .job-info .addr{font-weight:700;font-size:15.5px;line-height:1.3;color:var(--ink);}
+  .cust-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:3px;}
+  .job-info .cust{font-size:13px;color:var(--ink-soft);}
+  .phone-btn{
+    display:inline-flex;align-items:center;gap:4px;
+    color:var(--navy);text-decoration:none;font-size:12.5px;font-weight:700;
+    background:var(--slate-bg);border-radius:20px;padding:2px 8px 2px 7px;
+  }
+  .phone-btn:active{background:var(--line);}
+  .nav-btn{
+    display:inline-flex;align-items:center;gap:4px;flex:none;width:fit-content;
+    background:var(--navy);color:#fff;text-decoration:none;
+    font-size:11px;font-weight:700;padding:3px 8px 3px 7px;border-radius:20px;
+    white-space:nowrap;margin-top:7px;
+  }
+  .nav-btn:active{background:var(--navy-deep);}
+  .job-info .notes{font-size:12.5px;color:var(--amber-deep);margin-top:6px;font-weight:600;}
+  .job-card.status-cancelled .cust,.job-card.status-cancelled .addr{text-decoration:line-through;}
+
+  .price-block{display:flex;align-items:center;gap:10px;flex:none;}
+  .price-edit{display:flex;align-items:center;justify-content:flex-end;gap:2px;}
+  .price-edit .pfx{font-family:'Space Grotesk';font-weight:700;font-size:19px;color:var(--navy-deep);}
+  .price-input{
+    width:80px;border:none;background:transparent;text-align:right;
+    font-family:'Space Grotesk';font-weight:700;font-size:19px;color:var(--navy-deep);
+    padding:2px 2px;border-bottom:1.5px dashed var(--line);
+    -moz-appearance:textfield;
+  }
+  .price-input::-webkit-outer-spin-button,
+  .price-input::-webkit-inner-spin-button{
+    -webkit-appearance:none;margin:0;
+  }
+  .price-input:focus{outline:none;border-bottom-color:var(--navy);}
+  .price-block .front{
+    flex:none;width:46px;height:46px;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+    background:#fff;color:var(--amber-deep);border:2px solid var(--amber-deep);border-radius:11px;
+    font-size:9px;font-weight:700;letter-spacing:.02em;line-height:1.1;
+    cursor:pointer;font-family:inherit;padding:2px;
+  }
+  .price-block .front .tri{font-size:15px;line-height:1;}
+  .price-block .front.front-active{background:var(--amber-deep);color:#fff;}
+
+  .job-controls{display:flex;gap:8px;margin-top:14px;}
+  .status-btn{
+    flex:1;padding:9px 4px;border-radius:9px;border:1.5px solid var(--line);
+    background:#fff;font-size:12.5px;font-weight:700;cursor:pointer;color:var(--ink-soft);
+    display:flex;flex-direction:column;align-items:center;gap:2px;
+  }
+  .status-btn .ic{font-size:15px;}
+  .status-btn.active-done{background:var(--green);border-color:var(--green);color:#fff;}
+  .status-btn.active-skipped{background:var(--amber);border-color:var(--amber);color:#3a2a00;}
+  .status-btn.active-cancelled{background:var(--red);border-color:var(--red);color:#fff;}
+  .reject-btn{
+    width:100%;margin-top:8px;background:transparent;border:1.5px dashed var(--red);
+    color:var(--red);border-radius:9px;padding:7px 4px;font-size:12px;font-weight:600;
+    cursor:pointer;font-family:inherit;
+  }
+  .reject-btn:active{background:var(--red-bg);}
+  .reject-btn:disabled{opacity:.6;}
+
+  .pay-row{display:flex;gap:10px;margin-top:12px;}
+  .pay-field{flex:1;}
+  .pay-field label{font-size:12.5px;color:var(--ink-soft);font-weight:600;display:block;margin-bottom:5px;}
+  .pay-input-wrap{
+    display:flex;align-items:center;gap:2px;
+    border:1.5px solid var(--line);border-radius:9px;padding:8px 8px 8px 10px;background:#fbfcfd;
+  }
+  .pay-input-wrap .pfx{color:var(--ink-soft);}
+  .pay-input-wrap:focus-within{outline:2px solid var(--navy);border-color:var(--navy);}
+  .pay-input-wrap input{
+    width:100%;border:none;background:transparent;font-size:15px;font-weight:600;font-family:'Inter';padding:0;
+  }
+  .pay-input-wrap input:focus{outline:none;}
+  .balance-value{
+    border:1.5px solid var(--line);border-radius:9px;padding:9px 10px;background:#fbfcfd;
+    font-size:13.5px;
+  }
+
+  .note-field{margin-top:10px;}
+  .note-field label{font-size:12.5px;color:var(--ink-soft);font-weight:600;display:block;margin-bottom:5px;}
+  .note-field textarea{
+    width:100%;border:1.5px solid var(--line);border-radius:9px;padding:8px 9px;
+    font-size:13.5px;font-family:'Inter';background:#fbfcfd;resize:vertical;
+  }
+  .note-field textarea:focus{outline:2px solid var(--navy);border-color:var(--navy);}
+
+  /* squeegee wipe */
+  .wipe{
+    position:absolute;inset:0;pointer-events:none;
+    background:linear-gradient(100deg,transparent 0%,rgba(255,255,255,.85) 45%,rgba(255,255,255,0) 60%);
+    transform:translateX(-120%);
+  }
+  .wipe.play{animation:squeegee .55s ease-out;}
+  @keyframes squeegee{ to{transform:translateX(120%);} }
+  @media (prefers-reduced-motion: reduce){ .wipe.play{animation:none;} }
+
+  /* ---------- summary bar / footer ---------- */
+  .summary-bar{
+    position:sticky;bottom:0;left:0;right:0;
+    background:rgba(255,255,255,.92);backdrop-filter:blur(6px);
+    border-top:1px solid var(--line);
+    padding:10px 16px;display:flex;gap:10px;
+  }
+  .sum-pill{
+    flex:1;text-align:center;padding:6px 4px;border-radius:9px;background:var(--slate-bg);
+  }
+  .sum-pill .n{font-family:'Space Grotesk';font-weight:700;font-size:16px;color:var(--navy-deep);}
+  .sum-pill .l{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft);}
+  .finish-btn{
+    flex:none;background:var(--amber);color:var(--navy-deep);border:none;border-radius:9px;
+    font-weight:700;font-size:13px;padding:0 16px;cursor:pointer;
+  }
+
+  /* ---------- forms / admin ---------- */
+  .field{display:flex;flex-direction:column;gap:6px;}
+  .field label{font-size:13px;font-weight:600;color:var(--ink-soft);}
+  .field input,.field select{
+    border:1.5px solid var(--line);border-radius:10px;padding:11px 12px;font-size:15px;font-family:inherit;background:#fff;
+  }
+  .field input:focus,.field select:focus{outline:2px solid var(--navy);border-color:var(--navy);}
+  .btn{
+    border:none;border-radius:10px;padding:12px 16px;font-weight:700;font-size:14.5px;cursor:pointer;
+  }
+  .btn-primary{background:var(--navy);color:#fff;}
+  .btn-primary:active{background:var(--navy-deep);}
+  .btn-amber{background:var(--amber);color:var(--navy-deep);}
+  .btn-ghost{background:transparent;color:var(--navy);border:1.5px solid var(--line);}
+  .btn-block{width:100%;}
+  .tab-row{display:flex;gap:6px;margin-bottom:16px;background:var(--slate-bg);padding:4px;border-radius:11px;}
+  .tab-btn{flex:1;border:none;background:transparent;padding:9px 4px;border-radius:8px;font-weight:700;font-size:12.5px;color:var(--ink-soft);cursor:pointer;}
+  .tab-btn.active{background:#fff;color:var(--navy-deep);box-shadow:0 1px 3px rgba(10,37,64,.12);}
+  .section-title{font-family:'Space Grotesk';font-weight:700;font-size:15px;margin:0 0 10px;color:var(--navy-deep);}
+  .pad{padding:16px;}
+  .note-box{background:var(--slate-bg);border-radius:10px;padding:12px 14px;font-size:12.5px;color:var(--ink-soft);line-height:1.5;}
+
+  table.report{width:100%;border-collapse:collapse;font-size:12.5px;}
+  table.report th,table.report td{padding:7px 6px;text-align:left;border-bottom:1px solid var(--line);}
+  table.report th{font-size:10.5px;text-transform:uppercase;color:var(--ink-soft);letter-spacing:.03em;}
+  table.report td.num{text-align:right;font-weight:600;}
+  table.report th.num{text-align:right;}
+  .badge{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;font-weight:700;}
+  .badge-done{background:var(--green-bg);color:var(--green);}
+  .badge-skipped{background:#fbf3e0;color:var(--amber-deep);}
+  .badge-cancelled{background:var(--red-bg);color:var(--red);}
+  .badge-todo{background:var(--slate-bg);color:var(--ink-soft);}
+
+  .toast{
+    position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
+    background:var(--navy-deep);color:#fff;padding:11px 18px;border-radius:10px;font-size:13.5px;font-weight:600;
+    box-shadow:0 8px 20px rgba(10,37,64,.3);z-index:100;opacity:0;transition:opacity .2s;pointer-events:none;
+    max-width:90%;text-align:center;
+  }
+  .toast.show{opacity:1;}
+  .back-row{display:flex;align-items:center;gap:8px;margin-bottom:14px;}
+  .back-row .back{cursor:pointer;color:var(--navy);font-weight:700;font-size:13px;}
+  .empty-state{padding:40px 20px;text-align:center;color:var(--ink-soft);}
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+/* =========================================================================
+   FIREBASE SETUP — fill this in so every phone shares the same data.
+   1. Go to https://console.firebase.google.com, create a free project.
+   2. In the project, click the </> (web app) icon to register a web app —
+      it will show you a firebaseConfig object. Copy those values in below.
+   3. In the left menu go to Databases & Storage > Firestore > Create database
+      (choose the open/permissive starting rules option, not "Restrictive").
+   4. Later, tighten the rules in Firestore > Rules to something like:
+        rules_version = '2';
+        service cloud.firestore {
+          match /databases/{database}/documents {
+            match /workeriser/{docId} { allow read, write: if true; }
+          }
+        }
+      (This keeps it simple, no logins — same "not high security, just
+      keeps casual browsers out" level as the office password.)
+   ========================================================================= */
+const firebaseConfig = {
+  apiKey: "AIzaSyABEfdCUcjsaHwpu78luEE25R9__jgg0Q4",
+  authDomain: "workeriser.firebaseapp.com",
+  projectId: "workeriser",
+  storageBucket: "workeriser.firebasestorage.app",
+  messagingSenderId: "5012320559",
+  appId: "1:5012320559:web:047bc3931048a27cd171da"
+};
+
+const configOk = !!firebaseConfig.apiKey && !firebaseConfig.apiKey.startsWith('PASTE_');
+let db = null;
+if(configOk){
+  try{
+    const fbApp = initializeApp(firebaseConfig);
+    db = getFirestore(fbApp);
+  }catch(err){ console.error('Firebase init failed', err); }
+}
+
+async function fsGet(key){
+  if(!db) return null;
+  try{
+    const snap = await getDoc(doc(db,'workeriser',key));
+    return snap.exists() ? snap.data().value : null;
+  }catch(err){
+    console.error('fsGet failed', key, err);
+    toast('Connection problem loading data');
+    return null;
+  }
+}
+async function fsSet(key, value){
+  if(!db) return false;
+  try{
+    await setDoc(doc(db,'workeriser',key), { value, updatedAt: Date.now() });
+    return true;
+  }catch(err){
+    console.error('fsSet failed', key, err);
+    toast('Connection problem saving — try again');
+    return false;
+  }
+}
+
+/* ================= CONFIG / STORAGE ================= */
+const WORKERS = ['Simon','Jim','Lily','Shane','Vlado'];
+// Required whenever the office area hasn't had a custom password set for this
+// shared database. Visible to anyone who views the page source — this is a
+// "keep casual browsers out" lock, not real security.
+const DEFAULT_ADMIN_PW = 'squeegee2026';
+
+function todayStr(){
+  const d = new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+
+async function getPassword(){ const v = await fsGet('admin_pw'); return v || DEFAULT_ADMIN_PW; }
+async function setPassword(p){ await fsSet('admin_pw', p); }
+
+async function getMeta(){
+  const m = await fsGet('meta');
+  return m || { lastDate:{}, rounds:[] };
+}
+async function saveMeta(meta){ await fsSet('meta', meta); }
+
+async function loadJobs(worker,date){ return await fsGet(`jobs_${worker}_${date}`); }
+async function saveJobs(worker,date,jobs){
+  await fsSet(`jobs_${worker}_${date}`, jobs);
+  const meta = await getMeta();
+  meta.lastDate[worker] = date;
+  const key = `${worker}|${date}`;
+  if(!meta.rounds.includes(key)) meta.rounds.push(key);
+  await saveMeta(meta);
+}
+async function loadProgress(worker,date){ return (await fsGet(`progress_${worker}_${date}`)) || {}; }
+async function saveProgress(worker,date,prog){ await fsSet(`progress_${worker}_${date}`, prog); }
+
+async function findAnyDateForWorker(worker){
+  const meta = await getMeta();
+  return meta.lastDate[worker] || null;
+}
+
+// snapshots a worker's day before it's cleared, so historical reports survive
+// even after their live working list has been reset
+async function archiveBeforeClear(worker,date){
+  const [jobs, prog] = await Promise.all([loadJobs(worker,date), loadProgress(worker,date)]);
+  if(jobs && jobs.length){
+    await fsSet(`report_${worker}_${date}`, { jobs, prog });
+  }
+}
+
+// reads data for reporting: prefers an archived snapshot (taken at Clear time) over
+// live data, so a cleared day's report still reflects what actually happened that day
+async function loadForReport(worker,date){
+  const snap = await fsGet(`report_${worker}_${date}`);
+  if(snap) return snap;
+  const [jobs, prog] = await Promise.all([loadJobs(worker,date), loadProgress(worker,date)]);
+  return { jobs, prog };
+}
+
+// moves a set of jobs (by id) from one worker's round to another's, for the same date,
+// carrying over any progress (payment/price/note) already recorded against them
+async function moveJobsToWorker(fromWorker, toWorker, date, jobIds){
+  const [fromJobs, fromProg, toJobsRaw, toProgRaw, lookup] = await Promise.all([
+    loadJobs(fromWorker,date),
+    loadProgress(fromWorker,date),
+    loadJobs(toWorker,date),
+    loadProgress(toWorker,date),
+    loadCoordLookup()
+  ]);
+  const idSet = new Set(jobIds);
+  const source = fromJobs || [];
+  const moving = source.filter(j=>idSet.has(j.id));
+  const remaining = source.filter(j=>!idSet.has(j.id));
+  const toJobs = toJobsRaw || [];
+  const toProg = toProgRaw || {};
+  moving.forEach(j=>{
+    toJobs.push(j);
+    if(fromProg[j.id]){
+      toProg[j.id] = fromProg[j.id];
+      delete fromProg[j.id];
+    }
+  });
+  // reinsert into round order where possible (falls back to append-at-end if no round order is on file)
+  const roundOrder = lookup.roundOrder || [];
+  function roundRank(roundName){
+    const idx = roundOrder.indexOf(roundName);
+    return idx === -1 ? Infinity : idx;
+  }
+  toJobs.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
+  toJobs.forEach((j,idx)=>{ j.order = idx; });
+  await Promise.all([
+    saveJobs(fromWorker, date, remaining),
+    saveJobs(toWorker, date, toJobs),
+    saveProgress(fromWorker, date, fromProg),
+    saveProgress(toWorker, date, toProg)
+  ]);
+}
+
+/* ================= CSV PARSING ================= */
+function parseCSV(text){
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for(let i=0;i<text.length;i++){
+    const c = text[i];
+    if(inQuotes){
+      if(c === '"'){
+        if(text[i+1] === '"'){ field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else {
+      if(c === '"') inQuotes = true;
+      else if(c === ','){ row.push(field); field=''; }
+      else if(c === '\n'){ row.push(field); rows.push(row); row=[]; field=''; }
+      else if(c === '\r'){ /* skip */ }
+      else field += c;
+    }
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  if(!rows.length) return [];
+  const headers = rows[0].map(h=>h.trim());
+  return rows.slice(1).filter(r=>r.length>1 || r[0] !== '').map(r=>{
+    const obj = {};
+    headers.forEach((h,idx)=>{ obj[h] = (r[idx] !== undefined ? r[idx] : '').trim(); });
+    return obj;
+  });
+}
+
+function pick(row, candidates){
+  for(const c of candidates){
+    if(row[c] !== undefined && String(row[c]).trim() !== '') return row[c];
+  }
+  return '';
+}
+
+function rowsToJobs(rows){
+  return rows.map((r,idx)=>{
+    const price = parseFloat(pick(r,['Price'])) || 0;
+    const balance = parseFloat(pick(r,['Balance'])) || 0;
+    const frontPrice = Math.ceil(price/2 + 1);
+    const lat = parseFloat(pick(r,['Job Latitude','Customer Latitude']));
+    const lon = parseFloat(pick(r,['Job Longitude','Customer Longitude']));
+    const address = pick(r,['Job Address','Customer Address','Address']);
+    const postcode = pick(r,['Job Postcode','Customer Postcode']);
+    const phone = pick(r,['Job Phone 1','Customer Phone 1','Phone 1']);
+    const csvStatus = (pick(r,['Status']) || '').trim().toLowerCase();
+    return {
+      id: pick(r,['Aworka Job ID','Aworka ID','Job Ref']) || ('row'+idx),
+      order: idx,
+      customer: (pick(r,['Customer Name','Customer']) || '').trim() || '(no name on file)',
+      address: address,
+      postcode: postcode,
+      phone: phone,
+      lat: isFinite(lat) ? lat : null,
+      lon: isFinite(lon) ? lon : null,
+      round: pick(r,['Round']) || '',
+      price: price,
+      frontPrice: frontPrice,
+      balance: balance,
+      notes: pick(r,['Job Day Notes','Notes','Description','Job Notes']),
+      timeRequired: pick(r,['Time Required']),
+      frequency: pick(r,['Frequency']),
+      initialStatus: csvStatus === 'skip' ? 'skipped' : null
+    };
+  });
+}
+
+function navUrl(job){
+  if(job.lat != null && job.lon != null){
+    return `https://www.google.com/maps/dir/?api=1&destination=${job.lat},${job.lon}`;
+  }
+  const q = [job.address, job.postcode].filter(Boolean).join(', ');
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(q)}`;
+}
+
+/* ---- coordinate reference lookup (address -> lat/lon), updated occasionally ---- */
+async function loadCoordLookup(){ return (await fsGet('coord_lookup')) || { updatedAt:null, addresses:{}, roundOrder:[] }; }
+async function saveCoordLookup(lookup){ await fsSet('coord_lookup', lookup); }
+
+function normAddr(a){
+  return (a||'').toLowerCase().replace(/[^a-z0-9, ]/g,'').replace(/\s+/g,' ').trim();
+}
+
+function buildCoordAddresses(rows){
+  const addresses = {};
+  rows.forEach(r=>{
+    const addr = pick(r,['Job Address','Customer Address','Address']);
+    const lat = parseFloat(pick(r,['Job Latitude','Customer Latitude']));
+    const lon = parseFloat(pick(r,['Job Longitude','Customer Longitude']));
+    const n = normAddr(addr);
+    if(n && isFinite(lat) && isFinite(lon)){
+      addresses[n] = { lat, lon, raw: addr };
+    }
+  });
+  return addresses;
+}
+
+// the order rounds first appear in the reference CSV is treated as the canonical round sequence
+function buildRoundOrder(rows){
+  const order = [];
+  const seen = new Set();
+  rows.forEach(r=>{
+    const round = pick(r,['Round']);
+    if(round && !seen.has(round)){
+      seen.add(round);
+      order.push(round);
+    }
+  });
+  return order;
+}
+
+function findCoordsForAddress(address, lookup){
+  const n = normAddr(address);
+  if(!n) return null;
+  if(lookup.addresses[n]) return lookup.addresses[n];
+  let best = null, bestLen = 0;
+  for(const key in lookup.addresses){
+    if((key.includes(n) || n.includes(key)) && key.length > bestLen){
+      best = lookup.addresses[key];
+      bestLen = key.length;
+    }
+  }
+  return best;
+}
+
+// fills in missing coordinates on a set of jobs from the stored lookup; returns list of addresses still missing
+async function resolveCoordinates(jobs){
+  const lookup = await loadCoordLookup();
+  const missing = [];
+  jobs.forEach(job=>{
+    if(job.lat == null || job.lon == null){
+      const found = findCoordsForAddress(job.address, lookup);
+      if(found){ job.lat = found.lat; job.lon = found.lon; }
+    }
+    if(job.lat == null || job.lon == null){
+      missing.push(job.address || job.customer);
+    }
+  });
+  return missing;
+}
+
+// after a fresh coordinate reference is uploaded, retroactively fill in any already-loaded rounds
+async function rescanAllRoundsForCoords(){
+  const lookup = await loadCoordLookup();
+  const meta = await getMeta();
+  let fixed = 0, stillMissing = 0;
+  for(const key of meta.rounds){
+    const [worker,date] = key.split('|');
+    const jobs = await fsGet(`jobs_${worker}_${date}`);
+    if(!jobs) continue;
+    let changed = false;
+    jobs.forEach(job=>{
+      if(job.lat == null || job.lon == null){
+        const found = findCoordsForAddress(job.address, lookup);
+        if(found){ job.lat = found.lat; job.lon = found.lon; changed = true; fixed++; }
+        else stillMissing++;
+      }
+    });
+    if(changed) await fsSet(`jobs_${worker}_${date}`, jobs);
+  }
+  return { fixed, stillMissing };
+}
+
+/* ================= APP STATE ================= */
+let state = { screen:'login' };
+const app = document.getElementById('app');
+
+// Delays a job card's move into/out of the Completed section for 5s after the
+// last interaction with that card, so cash/price/note edits can still happen
+// without the card jumping away underneath the user.
+const cardTimers = new Map();
+function scheduleReflow(jobId, worker, date){
+  if(cardTimers.has(jobId)) clearTimeout(cardTimers.get(jobId));
+  const t = setTimeout(()=>{
+    cardTimers.delete(jobId);
+    if(state.screen==='worker' && state.worker===worker && state.date===date){
+      render();
+    }
+  }, 5000);
+  cardTimers.set(jobId, t);
+}
+
+function go(screen, extra){ state = Object.assign({screen}, extra); render(); }
+
+// Quietly checks every 15s for jobs added/removed by someone else (e.g. Simon
+// sending or reclaiming jobs) while a worker is sitting on their own list, and
+// refreshes automatically if anything's changed — no manual refresh needed.
+let workerPollTimer = null;
+function jobIdsKey(jobs){ return (jobs||[]).map(j=>j.id).sort().join(','); }
+function startWorkerPoll(worker, date, currentJobs){
+  if(workerPollTimer) clearInterval(workerPollTimer);
+  const knownKey = jobIdsKey(currentJobs);
+  workerPollTimer = setInterval(async ()=>{
+    if(state.screen!=='worker' || state.worker!==worker || state.date!==date){
+      clearInterval(workerPollTimer);
+      return;
+    }
+    const freshJobs = await loadJobs(worker,date);
+    if(jobIdsKey(freshJobs) !== knownKey){
+      render();
+    }
+  }, 15000);
+}
+
+function toast(msg){
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  requestAnimationFrame(()=>t.classList.add('show'));
+  setTimeout(()=>{ t.classList.remove('show'); setTimeout(()=>t.remove(),250); }, 1900);
+}
+
+function money(n){
+  const v = Math.round((n + Number.EPSILON)*100)/100;
+  const sign = v < 0 ? '-' : '';
+  return sign + '£' + Math.abs(v).toFixed(2);
+}
+
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g, s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
+}
+
+function resolvedPrice(job, p){
+  return (p && p.price !== undefined && p.price !== '' && !isNaN(parseFloat(p.price))) ? parseFloat(p.price) : job.price;
+}
+
+// skipped/cancelled jobs weren't actually cleaned, so no charge applies for the day
+function chargeForStatus(price, status){
+  return (status==='skipped' || status==='cancelled') ? 0 : price;
+}
+
+/* ================= RENDER ROUTER ================= */
+let lastScreenRendered = null;
+async function render(){
+  if(!configOk){ renderNeedsSetup(); return; }
+  const sameScreen = state.screen === lastScreenRendered;
+  const savedScroll = sameScreen ? window.scrollY : 0;
+  if(!sameScreen){
+    app.innerHTML = '<div class="center-screen"><p class="muted">Loading…</p></div>';
+  }
+  lastScreenRendered = state.screen;
+  if(state.screen==='login') await renderLogin();
+  else if(state.screen==='worker') await renderWorker();
+  else if(state.screen==='daySummary') await renderDaySummary();
+  else if(state.screen==='adminLogin') renderAdminLogin();
+  else if(state.screen==='admin') await renderAdmin();
+  if(sameScreen) window.scrollTo(0, savedScroll);
+}
+
+function renderNeedsSetup(){
+  app.innerHTML = `<div class="center-screen">
+    <h2 style="margin:0 0 8px;">Almost there</h2>
+    <p class="muted" style="max-width:340px;line-height:1.5;">This copy of Workeriser isn't connected to a shared database yet, so it can't sync between phones. Open the file and fill in the <b>firebaseConfig</b> values near the top of the &lt;script&gt; section — instructions are in the comment right above it.</p>
+  </div>`;
+}
+
+/* ================= LOGIN ================= */
+async function renderLogin(){
+  const today = todayStr();
+  const info = await Promise.all(WORKERS.map(async w=>{
+    const jobs = await loadJobs(w,today);
+    return { date: today, hasJobs: !!(jobs && jobs.length) };
+  }));
+  app.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'login-wrap';
+  wrap.innerHTML = `
+    <div class="login-hero">
+      <div class="glyph">
+        <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><path d="M4 4h11l5 5v11H4V4z" stroke="#f0a202" stroke-width="1.6" stroke-linejoin="round"/><path d="M15 4v5h5" stroke="#f0a202" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 13.5l2.2 2.2L16 10" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <h1>Workeriser</h1>
+      <p>Pick your name to see today's jobs</p>
+    </div>
+    <div class="stack" id="workerList"></div>
+    <div class="admin-link" id="adminLink">Office / Admin</div>
+  `;
+  app.appendChild(wrap);
+  const list = wrap.querySelector('#workerList');
+  WORKERS.forEach((w,i)=>{
+    const b = document.createElement('button');
+    b.className = 'worker-btn';
+    const { date, hasJobs } = info[i];
+    const sub = hasJobs ? `Job list loaded · ${date}` : 'No job list loaded yet';
+    b.innerHTML = `<div class="worker-avatar">${w[0]}</div>
+      <div><div class="name">${w}</div><div class="sub">${sub}</div></div>
+      <div class="chev">›</div>`;
+    b.onclick = ()=> go('worker', { worker:w });
+    list.appendChild(b);
+  });
+  wrap.querySelector('#adminLink').onclick = ()=> go('adminLogin');
+}
+
+/* ================= WORKER JOB LIST ================= */
+async function renderWorker(){
+  const worker = state.worker;
+  const date = state.date || todayStr();
+  state.date = date;
+  const [jobs, prog] = await Promise.all([loadJobs(worker,date), loadProgress(worker,date)]);
+  app.innerHTML = '';
+
+  const header = document.createElement('div');
+  header.className = 'topbar';
+  header.innerHTML = `
+    <div class="topbar-row">
+      <div class="brand">
+        <div class="brand-mark">${worker[0]}</div>
+        <div class="brand-text"><div class="t1">Job list · ${date}</div><div class="t2">${worker}</div></div>
+      </div>
+      <button class="topbar-btn" id="switchBtn">Switch</button>
+      ${worker==='Simon' ? `<button class="topbar-btn" id="selectBtn" style="margin-left:8px;">Select</button>` : ''}
+    </div>
+    ${jobs && jobs.length ? `<div class="topbar-sub"><span id="topDoneStat"></span><span>Collected <b id="topCollectedStat"></b></span></div>` : ''}
+  `;
+  app.appendChild(header);
+  header.querySelector('#switchBtn').onclick = ()=> go('login');
+
+  const main = document.createElement('div');
+  main.className = 'main';
+  app.appendChild(main);
+
+  const moveBarContainer = document.createElement('div');
+  main.appendChild(moveBarContainer);
+
+  if(!jobs || !jobs.length){
+    main.innerHTML = `<div class="empty-state">No job list has been loaded for ${worker} yet.<br>Ask the office to upload today's job list.</div>`;
+    return;
+  }
+
+  const bar = document.createElement('div');
+
+  function refreshStats(){
+    const doneCount = jobs.filter(j=>prog[j.id] && prog[j.id].status==='done').length;
+    const collected = jobs.reduce((s,j)=> s + (prog[j.id]?.payment ? parseFloat(prog[j.id].payment)||0 : 0), 0);
+    const remaining = jobs.length - jobs.filter(j=>prog[j.id] && prog[j.id].status!=='todo').length;
+    const doneStat = header.querySelector('#topDoneStat');
+    if(doneStat) doneStat.textContent = `${doneCount}/${jobs.length} done`;
+    const collectedStat = header.querySelector('#topCollectedStat');
+    if(collectedStat) collectedStat.textContent = money(collected);
+    const leftEl = bar.querySelector('#leftStatN');
+    if(leftEl) leftEl.textContent = remaining;
+    const collEl = bar.querySelector('#collectedStatN');
+    if(collEl) collEl.textContent = money(collected);
+  }
+
+  const sorted = jobs.slice().sort((a,b)=>a.order-b.order);
+  const todoJobs = sorted.filter(j=> !prog[j.id] || prog[j.id].status==='todo');
+  const completedJobs = sorted.filter(j=> prog[j.id] && prog[j.id].status!=='todo');
+
+  function renderGroup(list, onCard){
+    let lastRound = null;
+    list.forEach(job=>{
+      if(job.round && job.round !== lastRound){
+        const rl = document.createElement('div');
+        rl.className = 'round-label';
+        rl.textContent = job.round;
+        main.appendChild(rl);
+        lastRound = job.round;
+      }
+      const card = renderJobCard(worker,date,job,prog,refreshStats);
+      main.appendChild(card);
+      if(onCard) onCard(job, card);
+    });
+  }
+
+  const todoCardMap = new Map();
+  renderGroup(todoJobs, (job,card)=>{ todoCardMap.set(job.id, card); });
+
+  if(completedJobs.length){
+    const divider = document.createElement('div');
+    divider.className = 'completed-divider';
+    divider.innerHTML = `<span>Completed</span>`;
+    main.appendChild(divider);
+    renderGroup(completedJobs);
+  }
+
+  // footer summary / finish
+  bar.className = 'summary-bar';
+  const doneCount = jobs.filter(j=>prog[j.id] && prog[j.id].status==='done').length;
+  const collected = jobs.reduce((s,j)=> s + (prog[j.id]?.payment ? parseFloat(prog[j.id].payment)||0 : 0), 0);
+  const remaining = jobs.length - jobs.filter(j=>prog[j.id] && prog[j.id].status!=='todo').length;
+  bar.innerHTML = `
+    <div class="sum-pill"><div class="n" id="leftStatN">${remaining}</div><div class="l">Left</div></div>
+    <div class="sum-pill"><div class="n" id="collectedStatN">${money(collected)}</div><div class="l">Collected</div></div>
+    <button class="finish-btn" id="finishBtn">Day summary</button>
+  `;
+  app.appendChild(bar);
+  bar.querySelector('#finishBtn').onclick = ()=> go('daySummary',{worker,date});
+
+  const selectBtn = header.querySelector('#selectBtn');
+  if(selectBtn){
+    let selectMode = false;
+    const selectedIds = new Set();
+
+    function renderMoveBar(){
+      const existing = moveBarContainer.querySelector('.move-bar.select-bar');
+      if(existing) existing.remove();
+      if(!selectMode || selectedIds.size===0) return;
+      const others = WORKERS.filter(w=>w!==worker);
+      const mb = document.createElement('div');
+      mb.className = 'move-bar select-bar';
+      mb.innerHTML = `
+        <div class="move-bar-label">${selectedIds.size} selected — send to</div>
+        <div class="move-bar-targets">
+          ${others.map(w=>`<button type="button" class="move-target-btn" data-target="${escapeHtml(w)}">${escapeHtml(w)}</button>`).join('')}
+        </div>
+      `;
+      moveBarContainer.appendChild(mb);
+      mb.querySelectorAll('.move-target-btn').forEach(btn=>{
+        btn.onclick = async ()=>{
+          const target = btn.dataset.target;
+          const ids = Array.from(selectedIds);
+          btn.disabled = true;
+          await moveJobsToWorker(worker, target, date, ids);
+          toast(`Moved ${ids.length} job${ids.length===1?'':'s'} to ${target}`);
+          state.lastMove = { from:worker, to:target, date, ids };
+          render();
+        };
+      });
+    }
+
+    function setSelectMode(on, initialIds){
+      selectMode = on;
+      selectBtn.textContent = selectMode ? 'Cancel' : 'Select';
+      selectedIds.clear();
+      todoCardMap.forEach((card,jobId)=>{
+        let cb = card.querySelector('.job-select-checkbox');
+        if(selectMode){
+          card.classList.add('selectable');
+          if(!cb){
+            cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.className = 'job-select-checkbox';
+            cb.addEventListener('change', ()=>{
+              if(cb.checked) selectedIds.add(jobId); else selectedIds.delete(jobId);
+              renderMoveBar();
+            });
+            card.appendChild(cb);
+          }
+          const shouldCheck = !!(initialIds && initialIds.includes(jobId));
+          cb.checked = shouldCheck;
+          if(shouldCheck) selectedIds.add(jobId);
+        } else {
+          card.classList.remove('selectable');
+          if(cb) cb.remove();
+        }
+      });
+      renderMoveBar();
+    }
+
+    selectBtn.onclick = ()=> setSelectMode(!selectMode);
+
+    // show an Undo banner for the most recent move Simon made from this list
+    if(state.lastMove && state.lastMove.from===worker && state.lastMove.date===date){
+      const { to, ids } = state.lastMove;
+      const banner = document.createElement('div');
+      banner.className = 'move-bar undo-bar';
+      banner.innerHTML = `
+        <div class="move-bar-label">Moved ${ids.length} job${ids.length===1?'':'s'} to ${escapeHtml(to)}</div>
+        <div class="move-bar-targets">
+          <button type="button" class="move-target-btn" id="undoMoveBtn">Undo</button>
+          <button type="button" class="move-target-btn move-dismiss-btn" id="dismissMoveBtn">Dismiss</button>
+        </div>
+      `;
+      moveBarContainer.appendChild(banner);
+      banner.querySelector('#undoMoveBtn').onclick = async ()=>{
+        banner.remove();
+        await moveJobsToWorker(to, worker, date, ids);
+        toast(`Brought back ${ids.length} job${ids.length===1?'':'s'}`);
+        state.pendingSelection = ids;
+        delete state.lastMove;
+        render();
+      };
+      banner.querySelector('#dismissMoveBtn').onclick = ()=>{
+        delete state.lastMove;
+        banner.remove();
+      };
+    }
+
+    // if we just undid a move, re-enter select mode with those jobs pre-checked
+    if(state.pendingSelection){
+      const ids = state.pendingSelection;
+      delete state.pendingSelection;
+      setSelectMode(true, ids);
+    }
+  }
+
+  refreshStats();
+  startWorkerPoll(worker, date, jobs);
+}
+
+function renderJobCard(worker,date,job,prog,refreshStats){
+  const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'' };
+  const card = document.createElement('div');
+  card.className = `card job-card status-${p.status}`;
+
+  const debt = -job.balance; // positive = customer owes
+  const priceVal = (p.price !== undefined && p.price !== '' && !isNaN(parseFloat(p.price))) ? p.price : job.price;
+  const telHref = job.phone ? `tel:${job.phone.replace(/[^0-9+]/g,'')}` : '';
+
+  card.innerHTML = `
+    <div class="wipe"></div>
+    <div class="job-top">
+      <div class="job-info">
+        <div class="addr">${escapeHtml(job.address)}</div>
+        <div class="cust-row">
+          <span class="cust">${escapeHtml(job.customer)}</span>
+          ${job.phone ? `<a class="phone-btn" href="${telHref}">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none"><path d="M6 3h3l2 5-2.5 1.5a11 11 0 005 5L15 12l5 2v3a2 2 0 01-2 2A16 16 0 014 6a2 2 0 012-2z" fill="currentColor"/></svg>
+            ${escapeHtml(job.phone)}
+          </a>` : ''}
+        </div>
+        <a class="nav-btn" href="${navUrl(job)}" target="_blank" rel="noopener">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M3 11l17-8-8 17-2-7-7-2z" fill="currentColor"/></svg>
+          Navigate
+        </a>
+        ${job.notes ? `<div class="notes">⚠ ${escapeHtml(job.notes)}</div>` : ''}
+      </div>
+      <div class="price-block">
+        <button type="button" class="front" title="Tap to charge the front price instead"><span class="tri">⚠</span>FRONT</button>
+        <div class="price-edit"><span class="pfx">£</span><input type="number" class="price-input" inputmode="decimal" min="0" step="0.01" value="${parseFloat(priceVal).toFixed(2)}"></div>
+      </div>
+    </div>
+    <div class="job-controls">
+      <button class="status-btn ${p.status==='done'?'active-done':''}" data-action="done"><span class="ic">✓</span>Done</button>
+      <button class="status-btn ${p.status==='skipped'?'active-skipped':''}" data-action="skipped"><span class="ic">↷</span>Skipped</button>
+      <button class="status-btn ${p.status==='cancelled'?'active-cancelled':''}" data-action="cancelled"><span class="ic">✕</span>Cancelled</button>
+    </div>
+    <div class="pay-row">
+      <div class="pay-field">
+        <label>Cash paid</label>
+        <div class="pay-input-wrap"><span class="pfx">£</span><input type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${p.payment || ''}" class="pay-input"></div>
+      </div>
+      <div class="pay-field">
+        <label>Today's balance</label>
+        <div class="balance-value"></div>
+      </div>
+    </div>
+    <div class="note-field">
+      <label>Job note</label>
+      <textarea rows="2">${escapeHtml(p.note || '')}</textarea>
+    </div>
+    ${worker!=='Simon' && p.status==='todo' ? `<button type="button" class="reject-btn">Reject</button>` : ''}
+  `;
+
+  const priceInput = card.querySelector('.price-input');
+  const payInput = card.querySelector('.pay-input');
+  let currentStatus = p.status;
+
+  function currentPrice(){ return parseFloat(priceInput.value) || 0; }
+
+  function updateOwedAfter(){
+    const payment = parseFloat(payInput.value) || 0;
+    const chargeToday = (currentStatus==='skipped' || currentStatus==='cancelled') ? 0 : currentPrice();
+    const owedAfter = debt + chargeToday - payment;
+    const el = card.querySelector('.balance-value');
+    if(owedAfter > 0.004) el.innerHTML = `<b style="color:var(--red)">${money(owedAfter)}</b>`;
+    else if(owedAfter < -0.004) el.innerHTML = `<b style="color:var(--green)">${money(-owedAfter)}</b>`;
+    else el.innerHTML = `<b style="color:var(--green)">£0.00</b>`;
+  }
+  updateOwedAfter();
+
+  async function persist(mutator){
+    const current = prog[job.id] ? Object.assign({}, prog[job.id]) : {status:'todo',payment:'',price:'',note:''};
+    mutator(current);
+    prog[job.id] = current;
+    await saveProgress(worker,date,prog);
+  }
+
+  card.querySelectorAll('.status-btn').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const action = btn.dataset.action;
+      let newStatus;
+      await persist(current=>{
+        newStatus = current.status === action ? 'todo' : action;
+        current.status = newStatus;
+      });
+      currentStatus = newStatus;
+      card.className = `card job-card status-${newStatus}`;
+      card.querySelectorAll('.status-btn').forEach(b=>b.classList.remove('active-done','active-skipped','active-cancelled'));
+      if(newStatus !== 'todo') btn.classList.add(`active-${newStatus}`);
+      if(action==='done' && newStatus==='done'){
+        const wipe = card.querySelector('.wipe');
+        wipe.classList.add('play');
+      }
+      updateOwedAfter();
+      if(refreshStats) refreshStats();
+      scheduleReflow(job.id, worker, date);
+    };
+  });
+
+  const rejectBtn = card.querySelector('.reject-btn');
+  if(rejectBtn){
+    rejectBtn.onclick = async ()=>{
+      rejectBtn.disabled = true;
+      rejectBtn.textContent = 'Sending…';
+      await moveJobsToWorker(worker, 'Simon', date, [job.id]);
+      toast('Sent back to Simon');
+      render();
+    };
+  }
+
+  function updateFrontButton(){
+    const btn = card.querySelector('.front');
+    const atFront = Math.abs(currentPrice() - job.frontPrice) < 0.005;
+    btn.innerHTML = atFront ? '<span class="tri">⚠</span>BACK' : '<span class="tri">⚠</span>FRONT';
+    btn.classList.toggle('front-active', atFront);
+    btn.title = atFront ? 'Tap to go back to the full price' : 'Tap to charge the front price instead';
+  }
+  updateFrontButton();
+
+  priceInput.addEventListener('input', ()=>{
+    updateOwedAfter();
+    updateFrontButton();
+    persist(current=>{ current.price = priceInput.value; });
+    scheduleReflow(job.id, worker, date);
+  });
+  priceInput.addEventListener('blur', ()=>{
+    if(priceInput.value !== ''){
+      priceInput.value = currentPrice().toFixed(2);
+      updateOwedAfter();
+      updateFrontButton();
+      persist(current=>{ current.price = priceInput.value; });
+      scheduleReflow(job.id, worker, date);
+    }
+  });
+
+  card.querySelector('.front').onclick = ()=>{
+    const atFront = Math.abs(currentPrice() - job.frontPrice) < 0.005;
+    priceInput.value = (atFront ? job.price : job.frontPrice).toFixed(2);
+    updateOwedAfter();
+    updateFrontButton();
+    persist(current=>{ current.price = priceInput.value; });
+    scheduleReflow(job.id, worker, date);
+  };
+
+  payInput.addEventListener('input', ()=>{
+    updateOwedAfter();
+    persist(current=>{ current.payment = payInput.value; });
+    if(refreshStats) refreshStats();
+    scheduleReflow(job.id, worker, date);
+  });
+
+  card.querySelector('.note-field textarea').addEventListener('input', (e)=>{
+    persist(current=>{ current.note = e.target.value; });
+    scheduleReflow(job.id, worker, date);
+  });
+
+  return card;
+}
+
+/* ================= DAY SUMMARY (worker-facing) ================= */
+async function renderDaySummary(){
+  const {worker,date} = state;
+  const [jobsRaw, prog] = await Promise.all([loadJobs(worker,date), loadProgress(worker,date)]);
+  const jobs = jobsRaw || [];
+  app.innerHTML = '';
+
+  const header = document.createElement('div');
+  header.className = 'topbar';
+  header.innerHTML = `<div class="topbar-row">
+      <div class="brand"><div class="brand-mark">${worker[0]}</div>
+      <div class="brand-text"><div class="t1">Summary · ${date}</div><div class="t2">${worker}</div></div></div>
+      <button class="topbar-btn" id="backBtn">Back</button>
+    </div>`;
+  app.appendChild(header);
+  header.querySelector('#backBtn').onclick = ()=> go('worker',{worker,date});
+
+  const main = document.createElement('div');
+  main.className = 'main';
+  app.appendChild(main);
+
+  let collected=0, doneN=0, skippedN=0, cancelledN=0, outstanding=0;
+  const rows = jobs.slice().sort((a,b)=>a.order-b.order).map(j=>{
+    const p = prog[j.id] || {status:'todo',payment:0};
+    const payment = parseFloat(p.payment)||0;
+    const price = resolvedPrice(j,p);
+    collected += payment;
+    if(p.status==='done') doneN++;
+    if(p.status==='skipped') skippedN++;
+    if(p.status==='cancelled') cancelledN++;
+    const debt = -j.balance;
+    const owedAfter = debt + chargeForStatus(price,p.status) - payment;
+    if(p.status !== 'cancelled') outstanding += owedAfter;
+    return {job:j,status:p.status,payment,price,note:p.note||'',owedAfter};
+  });
+
+  const card = document.createElement('div');
+  card.className = 'card pad';
+  card.innerHTML = `
+    <div class="section-title">Today's totals</div>
+    <table class="report">
+      <tr><td>Jobs done</td><td class="num">${doneN} / ${jobs.length}</td></tr>
+      <tr><td>Skipped</td><td class="num">${skippedN}</td></tr>
+      <tr><td>Cancelled</td><td class="num">${cancelledN}</td></tr>
+      <tr><td>Cash collected</td><td class="num">${money(collected)}</td></tr>
+      <tr><td>Still outstanding</td><td class="num">${money(outstanding)}</td></tr>
+    </table>
+  `;
+  main.appendChild(card);
+
+  const card2 = document.createElement('div');
+  card2.className = 'card pad';
+  card2.style.marginTop = '14px';
+  let tableRows = rows.map(r=>`
+    <tr>
+      <td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td>
+      <td><span class="badge badge-${r.status}">${r.status}</span></td>
+      <td class="num">${money(r.payment)}</td>
+    </tr>`).join('');
+  card2.innerHTML = `
+    <div class="section-title">Job by job</div>
+    <table class="report">
+      <tr><th>Customer</th><th>Status</th><th class="num">Paid</th></tr>
+      ${tableRows}
+    </table>
+  `;
+  main.appendChild(card2);
+
+  const btnRow = document.createElement('div');
+  btnRow.className = 'stack';
+  btnRow.style.marginTop = '16px';
+  btnRow.innerHTML = `
+    <button class="btn btn-amber btn-block" id="copyBtn">Copy report to send to office</button>
+    <button class="btn btn-ghost btn-block" id="csvBtn">Download CSV</button>
+  `;
+  main.appendChild(btnRow);
+
+  btnRow.querySelector('#copyBtn').onclick = ()=>{
+    const text = buildReportText(worker,date,rows,{collected,outstanding,doneN,skippedN,cancelledN,total:jobs.length});
+    navigator.clipboard.writeText(text).then(()=>toast('Report copied — paste into WhatsApp/text')).catch(()=>{
+      const ta = document.createElement('textarea'); ta.value=text; document.body.appendChild(ta);
+      ta.select(); document.execCommand('copy'); ta.remove();
+      toast('Report copied — paste into WhatsApp/text');
+    });
+  };
+  btnRow.querySelector('#csvBtn').onclick = ()=> downloadReportCSV(worker,date,rows);
+}
+
+function buildReportText(worker,date,rows,totals){
+  let lines = [];
+  lines.push(`${worker} — ${date}`);
+  lines.push(`Done ${totals.doneN}/${totals.total} · Skipped ${totals.skippedN} · Cancelled ${totals.cancelledN}`);
+  lines.push(`Collected: ${money(totals.collected)}   Outstanding: ${money(totals.outstanding)}`);
+  lines.push('');
+  rows.forEach(r=>{
+    lines.push(`${r.job.customer} — ${r.status}, charged ${money(r.price)}${r.payment?`, paid ${money(r.payment)}`:''}${r.owedAfter>0.004?`, owes ${money(r.owedAfter)}`:''}${r.note?` — note: ${r.note}`:''}`);
+  });
+  return lines.join('\n');
+}
+
+function downloadReportCSV(worker,date,rows){
+  let csv = 'Customer,Address,Round,ListPrice,PriceCharged,Status,CashTaken,OwedAfter,Note\n';
+  rows.forEach(r=>{
+    csv += [r.job.customer,r.job.address,r.job.round,r.job.price.toFixed(2),r.price.toFixed(2),r.status,r.payment.toFixed(2),r.owedAfter.toFixed(2),r.note||'']
+      .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',') + '\n';
+  });
+  const blob = new Blob([csv],{type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${worker}_${date}_report.csv`;
+  a.click();
+}
+
+function downloadReportCSVMulti(date,rows){
+  let csv = 'Worker,Customer,Address,Round,ListPrice,PriceCharged,Status,CashTaken,OwedAfter,Note\n';
+  rows.forEach(r=>{
+    csv += [r.worker,r.job.customer,r.job.address,r.job.round,r.job.price.toFixed(2),r.price.toFixed(2),r.status,r.payment.toFixed(2),r.owedAfter.toFixed(2),r.note||'']
+      .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',') + '\n';
+  });
+  const blob = new Blob([csv],{type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `all-workers_${date}_report.csv`;
+  a.click();
+}
+
+/* ================= ADMIN LOGIN ================= */
+function renderAdminLogin(){
+  app.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'center-screen';
+  wrap.innerHTML = `
+    <div class="glyph" style="width:56px;height:56px;border-radius:14px;margin-bottom:18px;background:linear-gradient(160deg,var(--navy),var(--navy-deep));display:flex;align-items:center;justify-content:center;">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><rect x="5" y="10" width="14" height="10" rx="2" stroke="#f0a202" stroke-width="1.6"/><path d="M8 10V7a4 4 0 018 0v3" stroke="#f0a202" stroke-width="1.6"/></svg>
+    </div>
+    <h2 style="margin:0 0 6px;">Office area</h2>
+    <p class="muted" style="margin:0 0 20px;font-size:14px;">Enter the password to continue</p>
+    <div class="field" style="width:100%;max-width:280px;">
+      <input type="password" id="pwInput" placeholder="Password" autofocus>
+    </div>
+    <button class="btn btn-primary" id="pwGo" style="margin-top:14px;width:100%;max-width:280px;">Enter</button>
+    <div class="admin-link" id="backLogin" style="margin-top:22px;">Back</div>
+  `;
+  app.appendChild(wrap);
+  const input = wrap.querySelector('#pwInput');
+  wrap.querySelector('#pwGo').onclick = async ()=>{
+    const correct = await getPassword();
+    if(input.value === correct) go('admin');
+    else { toast('Wrong password'); input.value=''; input.focus(); }
+  };
+  input.addEventListener('keydown', e=>{ if(e.key==='Enter') wrap.querySelector('#pwGo').click(); });
+  wrap.querySelector('#backLogin').onclick = ()=> go('login');
+}
+
+/* ================= ADMIN AREA ================= */
+async function renderAdmin(){
+  app.innerHTML = '';
+  const header = document.createElement('div');
+  header.className = 'topbar';
+  header.innerHTML = `<div class="topbar-row">
+      <div class="brand"><div class="brand-mark">⚙</div>
+      <div class="brand-text"><div class="t1">Office</div><div class="t2">Admin</div></div></div>
+      <button class="topbar-btn" id="exitAdmin">Exit</button>
+    </div>`;
+  app.appendChild(header);
+  header.querySelector('#exitAdmin').onclick = ()=> go('login');
+
+  const main = document.createElement('div');
+  main.className = 'main';
+  app.appendChild(main);
+
+  const tab = state.adminTab || 'upload';
+  const tabs = document.createElement('div');
+  tabs.className = 'tab-row';
+  [['upload','Upload'],['report','Reports'],['settings','Settings']].forEach(([k,label])=>{
+    const b = document.createElement('button');
+    b.className = 'tab-btn' + (tab===k?' active':'');
+    b.textContent = label;
+    b.onclick = ()=>{ state.adminTab = k; render(); };
+    tabs.appendChild(b);
+  });
+  main.appendChild(tabs);
+
+  if(tab==='upload') await renderAdminUpload(main);
+  else if(tab==='report') renderAdminReport(main);
+  else renderAdminSettings(main);
+}
+
+async function renderAdminUpload(main){
+  const card = document.createElement('div');
+  card.className = 'card pad';
+  const options = WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
+  card.innerHTML = `
+    <div class="section-title">Upload a job list CSV</div>
+    <div class="stack">
+      <div class="field"><label>Worker</label><select id="uWorker">${options}</select></div>
+      <div class="field"><label>Date this job list is for</label><input type="date" id="uDate" value="${todayStr()}"></div>
+      <div class="field"><label>CSV file</label><input type="file" id="uFile" accept=".csv"></div>
+      <button class="btn btn-primary btn-block" id="uGo">Load job list</button>
+      <div id="uStatus"></div>
+    </div>
+  `;
+  main.appendChild(card);
+
+  card.querySelector('#uWorker').addEventListener('change', ()=>{
+    card.querySelector('#uFile').value = '';
+    card.querySelector('#uStatus').innerHTML = '';
+  });
+
+  card.querySelector('#uGo').onclick = ()=>{
+    const worker = card.querySelector('#uWorker').value;
+    const date = card.querySelector('#uDate').value || todayStr();
+    const fileInput = card.querySelector('#uFile');
+    const file = fileInput.files[0];
+    if(!file){ toast('Choose a CSV file first'); return; }
+    const reader = new FileReader();
+    reader.onload = async (e)=>{
+      try{
+        const rows = parseCSV(e.target.result);
+        const jobs = rowsToJobs(rows);
+        if(!jobs.length){ toast('No rows found in that file'); return; }
+        const missing = await resolveCoordinates(jobs);
+        const preSkipped = jobs.filter(j=>j.initialStatus==='skipped');
+        jobs.forEach(j=>{ delete j.initialStatus; });
+        await saveJobs(worker,date,jobs);
+        if(preSkipped.length){
+          const existingProg = await loadProgress(worker,date);
+          let changed = false;
+          preSkipped.forEach(j=>{
+            if(!existingProg[j.id]){
+              existingProg[j.id] = { status:'skipped', payment:'', price:'', note:'' };
+              changed = true;
+            }
+          });
+          if(changed) await saveProgress(worker,date,existingProg);
+        }
+        await refreshLoadedRounds();
+        let msg = `Loaded <b>${jobs.length}</b> jobs for <b>${worker}</b> on <b>${date}</b>.`;
+        if(preSkipped.length){
+          msg += ` ${preSkipped.length} marked as skipped from the file.`;
+        }
+        if(missing.length){
+          msg += `<br><br>⚠ ${missing.length} address${missing.length===1?'':'es'} couldn't be matched to coordinates:<br>` +
+            missing.map(m=>'• '+escapeHtml(m)).join('<br>') +
+            `<br>Upload a fresh coordinate reference file below to fix ${missing.length===1?'it':'these'}.`;
+        } else {
+          msg += ` All addresses matched to coordinates.`;
+        }
+        card.querySelector('#uStatus').innerHTML = `<div class="note-box" style="margin-top:6px;">${msg}</div>`;
+        toast(missing.length ? `Loaded ${jobs.length} jobs, ${missing.length} missing coordinates` : `Loaded ${jobs.length} jobs for ${worker}`);
+      }catch(err){
+        console.error(err);
+        toast('Could not read that CSV');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const existing = document.createElement('div');
+  existing.className = 'card pad';
+  existing.style.marginTop = '14px';
+  existing.innerHTML = `<div class="section-title">Currently loaded job lists</div>`;
+  const listEl = document.createElement('div');
+  listEl.className = 'stack';
+  existing.appendChild(listEl);
+  main.appendChild(existing);
+
+  async function refreshLoadedRounds(){
+    const rows = await Promise.all(WORKERS.map(async w=>{
+      const d = await findAnyDateForWorker(w);
+      const jobs = d ? await loadJobs(w,d) : null;
+      return { w, d, jobs };
+    }));
+    listEl.innerHTML = '';
+    rows.forEach(({w,d,jobs})=>{
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;font-size:13.5px;padding:8px 0;border-bottom:1px solid var(--line);gap:10px;';
+      row.innerHTML = `<span><b>${w}</b></span>
+        <span class="muted" style="text-align:right;">${jobs && jobs.length ? `${jobs.length} jobs · ${d}` : 'nothing loaded'}</span>
+        ${jobs && jobs.length ? `<button type="button" class="clear-round-btn" data-worker="${escapeHtml(w)}" data-date="${d}" style="flex:none;background:transparent;border:1.5px solid var(--line);color:var(--red);border-radius:8px;padding:5px 9px;font-size:12px;font-weight:700;cursor:pointer;">Clear</button>` : ''}
+      `;
+      listEl.appendChild(row);
+    });
+    listEl.querySelectorAll('.clear-round-btn').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const w = btn.dataset.worker, d = btn.dataset.date;
+        if(!confirm(`Clear ${w}'s job list for ${d}? Their report for that day is kept — this only resets their working list.`)) return;
+        btn.disabled = true;
+        await archiveBeforeClear(w, d);
+        await saveJobs(w, d, []);
+        await saveProgress(w, d, {});
+        toast(`Cleared ${w}'s job list — that day's report is still available`);
+        refreshLoadedRounds();
+      };
+    });
+  }
+  await refreshLoadedRounds();
+
+  const coordCard = document.createElement('div');
+  coordCard.className = 'card pad';
+  coordCard.style.marginTop = '14px';
+  const lookup = await loadCoordLookup();
+  const addrCount = Object.keys(lookup.addresses).length;
+  coordCard.innerHTML = `
+    <div class="section-title">Coordinate reference</div>
+    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">Upload your "active, sorted by round order" export occasionally to keep GPS coordinates and round order on file. Daily job list CSVs don't carry this themselves — addresses are matched against this list automatically whenever you load a job list above.</p>
+    <div class="note-box" style="margin:10px 0;">${addrCount ? `${addrCount} addresses on file${lookup.updatedAt ? ` · updated ${lookup.updatedAt}` : ''}` : 'No coordinate reference uploaded yet'}</div>
+    <div class="field"><label>active-round-order...csv</label><input type="file" id="cFile" accept=".csv"></div>
+    <button class="btn btn-ghost btn-block" id="cGo" style="margin-top:10px;">Update coordinates</button>
+    <div id="cStatus"></div>
+  `;
+  main.appendChild(coordCard);
+
+  coordCard.querySelector('#cGo').onclick = ()=>{
+    const file = coordCard.querySelector('#cFile').files[0];
+    if(!file){ toast('Choose a CSV file first'); return; }
+    const reader = new FileReader();
+    reader.onload = async (e)=>{
+      try{
+        const rows = parseCSV(e.target.result);
+        const addresses = buildCoordAddresses(rows);
+        const roundOrder = buildRoundOrder(rows);
+        const count = Object.keys(addresses).length;
+        if(!count){ toast('No coordinates found in that file'); return; }
+        await saveCoordLookup({ updatedAt: new Date().toLocaleDateString('en-GB'), addresses, roundOrder });
+        const { fixed, stillMissing } = await rescanAllRoundsForCoords();
+        coordCard.querySelector('#cStatus').innerHTML = `<div class="note-box" style="margin-top:8px;">Saved ${count} addresses.${fixed ? ` Filled in coordinates for ${fixed} already-loaded job${fixed===1?'':'s'}.` : ''}${stillMissing ? ` ${stillMissing} job${stillMissing===1?'':'s'} still missing — check the address spelling matches.` : ''}</div>`;
+        toast('Coordinate reference updated');
+      }catch(err){ console.error(err); toast('Could not read that CSV'); }
+    };
+    reader.readAsText(file);
+  };
+}
+
+function renderAdminReport(main){
+  const card = document.createElement('div');
+  card.className = 'card pad';
+  const options = `<option value="ALL">All workers</option>` + WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
+  card.innerHTML = `
+    <div class="section-title">View a report</div>
+    <div class="stack">
+      <div class="field"><label>Worker</label><select id="rWorker">${options}</select></div>
+      <div class="field"><label>Date</label><input type="date" id="rDate" value="${todayStr()}"></div>
+      <button class="btn btn-primary btn-block" id="rGo">Show report</button>
+    </div>
+    <div id="rOut" style="margin-top:16px;"></div>
+  `;
+  main.appendChild(card);
+
+  async function showReport(){
+    const worker = card.querySelector('#rWorker').value;
+    const date = card.querySelector('#rDate').value;
+    const out = card.querySelector('#rOut');
+
+    if(worker === 'ALL'){
+      const results = await Promise.all(WORKERS.map(async w=>{
+        const { jobs, prog } = await loadForReport(w,date);
+        return { w, jobs: jobs || [], prog: prog || {} };
+      }));
+      let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0, totalJobs=0;
+      const allRows = [];
+      results.forEach(({w, jobs, prog})=>{
+        totalJobs += jobs.length;
+        jobs.slice().sort((a,b)=>a.order-b.order).forEach(j=>{
+          const p = prog[j.id] || {status:'todo',payment:0};
+          const payment = parseFloat(p.payment)||0;
+          const price = resolvedPrice(j,p);
+          collected += payment;
+          if(p.status==='done') doneN++;
+          if(p.status==='skipped') skippedN++;
+          if(p.status==='cancelled') cancelledN++;
+          const debt = -j.balance;
+          const owedAfter = debt + chargeForStatus(price,p.status) - payment;
+          if(p.status !== 'cancelled') outstanding += owedAfter;
+          allRows.push({worker:w,job:j,status:p.status,payment,price,note:p.note||'',owedAfter});
+        });
+      });
+      if(!totalJobs){ out.innerHTML = `<p class="muted">No job lists loaded for ${date} yet.</p>`; return; }
+      const lookup = await loadCoordLookup();
+      const roundOrder = lookup.roundOrder || [];
+      function roundRank(roundName){
+        const idx = roundOrder.indexOf(roundName);
+        return idx === -1 ? Infinity : idx;
+      }
+      allRows.sort((a,b)=>{
+        const ra = roundRank(a.job.round), rb = roundRank(b.job.round);
+        if(ra !== rb) return ra - rb;
+        if(a.job.round !== b.job.round) return (a.job.round||'').localeCompare(b.job.round||'');
+        return a.job.order - b.job.order;
+      });
+      const completeRows = allRows.filter(r=>r.status!=='todo');
+      out.innerHTML = `
+        <table class="report">
+          <tr><td>Jobs done</td><td class="num">${doneN} / ${totalJobs}</td></tr>
+          <tr><td>Skipped</td><td class="num">${skippedN}</td></tr>
+          <tr><td>Cancelled</td><td class="num">${cancelledN}</td></tr>
+          <tr><td>Cash collected</td><td class="num">${money(collected)}</td></tr>
+          <tr><td>Still outstanding</td><td class="num">${money(outstanding)}</td></tr>
+        </table>
+        <div class="section-title" style="margin-top:16px;">All completed jobs</div>
+        <table class="report">
+          <tr><th>Worker</th><th>Address</th><th>Status</th><th class="num">Paid</th></tr>
+          ${completeRows.length ? completeRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${r.status}</span></td><td class="num">${money(r.payment)}</td></tr>`).join('') : `<tr><td colspan="4" class="muted">No completed jobs yet.</td></tr>`}
+        </table>
+        <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
+      `;
+      out.querySelector('#rCsv').onclick = ()=> downloadReportCSVMulti(date, allRows);
+      return;
+    }
+
+    const { jobs, prog: progRaw } = await loadForReport(worker,date);
+    if(!jobs || !jobs.length){ out.innerHTML = `<p class="muted">No job list loaded for ${worker} on ${date}.</p>`; return; }
+    const prog = progRaw || {};
+    let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0;
+    const rows = jobs.slice().sort((a,b)=>a.order-b.order).map(j=>{
+      const p = prog[j.id] || {status:'todo',payment:0};
+      const payment = parseFloat(p.payment)||0;
+      const price = resolvedPrice(j,p);
+      collected += payment;
+      if(p.status==='done') doneN++;
+      if(p.status==='skipped') skippedN++;
+      if(p.status==='cancelled') cancelledN++;
+      const debt = -j.balance;
+      const owedAfter = debt + chargeForStatus(price,p.status) - payment;
+      if(p.status !== 'cancelled') outstanding += owedAfter;
+      return {job:j,status:p.status,payment,price,note:p.note||'',owedAfter};
+    });
+    const actionedRows = rows.filter(r=>r.status!=='todo');
+    out.innerHTML = `
+      <table class="report">
+        <tr><td>Jobs done</td><td class="num">${doneN} / ${jobs.length}</td></tr>
+        <tr><td>Skipped</td><td class="num">${skippedN}</td></tr>
+        <tr><td>Cancelled</td><td class="num">${cancelledN}</td></tr>
+        <tr><td>Cash collected</td><td class="num">${money(collected)}</td></tr>
+        <tr><td>Still outstanding</td><td class="num">${money(outstanding)}</td></tr>
+      </table>
+      <div class="section-title" style="margin-top:16px;">Completed jobs</div>
+      <table class="report">
+        <tr><th>Address</th><th>Status</th><th class="num">Paid</th></tr>
+        ${actionedRows.length ? actionedRows.map(r=>`<tr><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${r.status}</span></td><td class="num">${money(r.payment)}</td></tr>`).join('') : `<tr><td colspan="3" class="muted">No completed jobs yet.</td></tr>`}
+      </table>
+      <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
+    `;
+    out.querySelector('#rCsv').onclick = ()=> downloadReportCSV(worker,date,rows);
+  }
+  card.querySelector('#rGo').onclick = showReport;
+}
+
+function renderAdminSettings(main){
+  const card = document.createElement('div');
+  card.className = 'card pad';
+  card.innerHTML = `
+    <div class="section-title">Change office password</div>
+    <p class="muted" style="font-size:12.5px;margin-top:-4px;">This is shared — changing it updates the password required on every phone, not just this one.</p>
+    <div class="stack" style="margin-top:10px;">
+      <div class="field"><label>New password</label><input type="password" id="newPw2"></div>
+      <button class="btn btn-primary btn-block" id="changePwBtn">Update password</button>
+    </div>
+  `;
+  main.appendChild(card);
+  card.querySelector('#changePwBtn').onclick = async ()=>{
+    const v = card.querySelector('#newPw2').value;
+    if(!v){ toast('Enter a password'); return; }
+    await setPassword(v);
+    toast('Password updated');
+  };
+
+  const wipe = document.createElement('div');
+  wipe.className = 'card pad';
+  wipe.style.marginTop = '14px';
+  wipe.innerHTML = `
+    <div class="section-title">Storage</div>
+    <p class="muted" style="font-size:13px;margin-top:-4px;line-height:1.5;">Job list data, cash taken, and job statuses are stored in a shared Firebase database, so any phone with this app open can see the same information. The office password is just a screen in this app, not real access control — anyone with the Firebase project details could still reach the data directly, so don't put anything highly sensitive in here.</p>
+  `;
+  main.appendChild(wipe);
+}
+
+/* ================= INIT ================= */
+render();
+</script>
+</body>
+</html>
