@@ -43,7 +43,10 @@
   }
   h1,h2,h3,.display{font-family:'Space Grotesk',system-ui,sans-serif;}
   button{font-family:inherit;}
-  #app{max-width:560px;margin:0 auto;min-height:100vh;background:var(--bg);display:flex;flex-direction:column;}
+  #app{max-width:560px;margin:0 auto;min-height:100vh;background:var(--bg);display:flex;flex-direction:column;transition:max-width .15s ease;}
+  #app.admin-wide{max-width:1100px;}
+  #app.admin-wide table.report{font-size:13.5px;}
+  #app.admin-wide table.report th,#app.admin-wide table.report td{padding:10px 12px;}
 
   /* ---------- header ---------- */
   .topbar{
@@ -715,22 +718,26 @@ function chargedCell(r){
   if(r.status === 'todo') return `<td class="num">-</td>`;
   const charged = chargeForStatus(r.price, r.status);
   const isFront = charged > 0.004 && !!r.frontApplied;
-  return `<td class="num">${isFront ? '<span class="badge badge-front">F</span> ' : ''}${money(charged)}</td>`;
+  const isAltered = !isFront && charged > 0.004 && Math.abs(charged - r.job.price) > 0.005;
+  const style = isAltered ? ' style="color:var(--navy);font-weight:700;"' : '';
+  return `<td class="num"${style}>${isFront ? '<span class="badge badge-front">F</span> ' : ''}${money(charged)}</td>`;
 }
 
-// report-table cell for cash paid
+// report-table cell for cash paid — red draws the eye to unpaid jobs, green confirms cash in hand
 function paidCell(r){
   if(r.status === 'todo') return `<td class="num">-</td>`;
-  return `<td class="num">${money(r.payment)}</td>`;
+  const paid = r.payment;
+  const color = paid > 0.004 ? 'var(--green)' : 'var(--red)';
+  return `<td class="num"><b style="color:${color}">${money(paid)}</b></td>`;
 }
 
-// report-table cell for the running balance after today, colour-coded like the job card
+// report-table cell for the running balance after today — muted, since Paid is the main signal here
 function balanceCell(r){
   if(r.status === 'todo') return `<td class="num">-</td>`;
   const bal = r.owedAfter;
-  const color = bal > 0.004 ? 'var(--red)' : 'var(--green)';
+  const color = bal > 0.004 ? '#a97b7b' : '#7a9c8c';
   const val = bal > 0.004 ? bal : (bal < -0.004 ? -bal : 0);
-  return `<td class="num"><b style="color:${color}">${money(val)}</b></td>`;
+  return `<td class="num" style="color:${color}">${money(val)}</td>`;
 }
 
 function statusLabel(status){
@@ -747,6 +754,7 @@ async function render(){
     app.innerHTML = '<div class="center-screen"><p class="muted">Loading…</p></div>';
   }
   lastScreenRendered = state.screen;
+  app.classList.toggle('admin-wide', state.screen==='admin' || state.screen==='adminLogin');
   if(state.screen==='login') await renderLogin();
   else if(state.screen==='worker') await renderWorker();
   else if(state.screen==='daySummary') await renderDaySummary();
