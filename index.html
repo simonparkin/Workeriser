@@ -755,16 +755,18 @@ function renderNewCustomerSection(rows){
   if(!newRows.length) return '';
   return `
     <div class="card pad" style="margin-top:14px;border:1.5px solid var(--blue);">
-      <div class="section-title" style="color:var(--blue);">New customers to add to Aworka</div>
+      <div class="section-title" style="color:var(--blue);">New customers</div>
       ${newRows.map(r=>{
         const j = r.job;
         const name = [j.title, j.firstName, j.lastName].filter(Boolean).join(' ') || '(name not given)';
+        const payMethods = [j.gocardless ? 'Gocardless' : '', j.invoice ? 'Invoice' : ''].filter(Boolean).join(', ');
         return `
           <div style="padding:10px 0;border-bottom:1px solid var(--line);font-size:13px;line-height:1.6;">
             <b>${escapeHtml(name)}</b>${r.worker ? ` <span class="muted">(${escapeHtml(r.worker)})</span>` : ''} — ${escapeHtml(j.address)}<br>
             Price: ${money(j.price)} · Frequency: ${escapeHtml(j.frequency||'—')} · Status: ${statusLabel(r.status)}<br>
             ${j.email ? `Email: ${escapeHtml(j.email)}<br>` : ''}
-            ${j.needsGateText ? `Needs gate text · Phone: ${escapeHtml(j.phone||'—')}<br>` : (j.phone ? `Phone: ${escapeHtml(j.phone)}<br>` : '')}
+            ${j.phone ? `Phone: ${escapeHtml(j.phone)}${j.needsGateText ? ' (requires txt night before)' : ''}<br>` : (j.needsGateText ? `Requires txt night before — no phone given<br>` : '')}
+            ${payMethods ? `Payment: ${payMethods}<br>` : ''}
             ${j.notes ? `Notes: ${escapeHtml(j.notes)}` : ''}
           </div>
         `;
@@ -1088,6 +1090,11 @@ function renderJobCard(worker,date,job,prog,refreshStats){
       <label>Job note</label>
       <textarea rows="2">${escapeHtml(p.note || '')}</textarea>
     </div>
+    ${job.isNewCustomer ? `
+    <div style="display:flex;gap:8px;margin-top:8px;">
+      <button type="button" class="nc-edit-btn" style="flex:1;background:transparent;border:1.5px dashed var(--blue);color:var(--blue);border-radius:9px;padding:7px 4px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Edit</button>
+      <button type="button" class="nc-delete-btn" style="flex:1;background:transparent;border:1.5px dashed var(--red);color:var(--red);border-radius:9px;padding:7px 4px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Delete</button>
+    </div>` : ''}
     ${worker!=='Simon' && p.status==='todo' ? `<button type="button" class="reject-btn">Reject</button>` : ''}
   `;
 
@@ -1148,6 +1155,22 @@ function renderJobCard(worker,date,job,prog,refreshStats){
     };
   }
 
+  const ncEditBtn = card.querySelector('.nc-edit-btn');
+  if(ncEditBtn){
+    ncEditBtn.onclick = ()=> go('newCustomer', {worker, date, fromScreen:'worker', editJobId: job.id});
+  }
+  const ncDeleteBtn = card.querySelector('.nc-delete-btn');
+  if(ncDeleteBtn){
+    ncDeleteBtn.onclick = async ()=>{
+      if(!confirm(`Delete this new customer entry (${job.address})? This can't be undone.`)) return;
+      ncDeleteBtn.disabled = true;
+      ncDeleteBtn.textContent = 'Deleting…';
+      await deleteNewCustomerJob(worker, date, job.id);
+      toast('New customer deleted');
+      render();
+    };
+  }
+
   let frontApplied = !!p.frontApplied;
 
   function updateFrontButton(){
@@ -1203,13 +1226,14 @@ function renderJobCard(worker,date,job,prog,refreshStats){
 async function renderNewCustomer(){
   const { worker, date } = state;
   const fromScreen = state.fromScreen || 'worker';
+  const editJobId = state.editJobId || null;
   app.innerHTML = '';
 
   const header = document.createElement('div');
   header.className = 'topbar';
   header.innerHTML = `<div class="topbar-row">
       <div class="brand"><div class="brand-mark">+</div>
-      <div class="brand-text"><div class="t1">${escapeHtml(worker)} · ${date}</div><div class="t2">New customer</div></div></div>
+      <div class="brand-text"><div class="t1">${escapeHtml(worker)} · ${date}</div><div class="t2">${editJobId ? 'Edit new customer' : 'New customer'}</div></div></div>
       <button class="topbar-btn" id="backBtn">Cancel</button>
     </div>`;
   app.appendChild(header);
@@ -1219,34 +1243,35 @@ async function renderNewCustomer(){
   main.className = 'main';
   app.appendChild(main);
 
-  // work out a sensible round default from the next job still to do
   const existingJobs = (await loadJobs(worker, date)) || [];
-  const sorted = existingJobs.slice().sort((a,b)=>a.order-b.order);
-  const existingProg = await loadProgress(worker, date);
-  const nextTodo = sorted.find(j => !existingProg[j.id] || existingProg[j.id].status==='todo');
-  const suggestedRound = (nextTodo && nextTodo.round) || (sorted.length ? sorted[sorted.length-1].round : '') || '';
+  const editingJob = editJobId ? existingJobs.find(j=>j.id===editJobId) : null;
+
+  // work out a sensible round default from the next job still to do (only for new entries)
+  let suggestedRound = editingJob ? editingJob.round : '';
+  if(!editingJob){
+    const sorted = existingJobs.slice().sort((a,b)=>a.order-b.order);
+    const existingProg = await loadProgress(worker, date);
+    const nextTodo = sorted.find(j => !existingProg[j.id] || existingProg[j.id].status==='todo');
+    suggestedRound = (nextTodo && nextTodo.round) || (sorted.length ? sorted[sorted.length-1].round : '') || '';
+  }
 
   const card = document.createElement('div');
   card.className = 'card pad';
   card.innerHTML = `
-    <div class="section-title">New customer</div>
+    <div class="section-title">${editJobId ? 'Edit new customer' : 'New customer'}</div>
     <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">This adds a job to today's list. Mark it Done/Skipped and take payment the same way as any other job — it'll show up in reports flagged for you to add to Aworka.</p>
     <div class="stack" style="margin-top:12px;">
-      <div class="field"><label>Address *</label><input type="text" id="ncAddress" placeholder="e.g. 12 Example Street, Town"></div>
-      <div class="field"><label>Price *</label><input type="number" id="ncPrice" inputmode="decimal" min="0" step="0.01" placeholder="0.00"></div>
+      <div class="field"><label>Address *</label><input type="text" id="ncAddress" placeholder="e.g. 12 Example Street, Town" value="${editingJob ? escapeHtml(editingJob.address) : ''}"></div>
+      <div class="field"><label>Price *</label><input type="number" id="ncPrice" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${editingJob ? editingJob.price : ''}"></div>
       <div class="field"><label>Frequency *</label>
         <select id="ncFrequency">
           <option value="">Select…</option>
-          <option>Weekly</option>
-          <option>2-Weekly</option>
-          <option>4-Weekly</option>
-          <option value="Monthly">Monthly (4-Weekly)</option>
-          <option>8-Weekly</option>
-          <option>One-off</option>
-          <option value="__other">Other…</option>
+          <option${editingJob && editingJob.frequency==='Monthly' ? ' selected' : ''}>Monthly</option>
+          <option${editingJob && editingJob.frequency==='Bi-monthly' ? ' selected' : ''}>Bi-monthly</option>
+          <option${editingJob && editingJob.frequency==='Weekly' ? ' selected' : ''}>Weekly</option>
+          <option${editingJob && editingJob.frequency==='One-off' ? ' selected' : ''}>One-off</option>
         </select>
       </div>
-      <div class="field" id="ncFrequencyOtherWrap" style="display:none;"><label>Frequency (other)</label><input type="text" id="ncFrequencyOther" placeholder="e.g. 6-Weekly"></div>
       <div class="field"><label>Round</label><input type="text" id="ncRound" value="${escapeHtml(suggestedRound)}" placeholder="Nearest round"></div>
       <div class="note-box" id="ncGeoStatus">📍 Getting location…</div>
 
@@ -1254,27 +1279,40 @@ async function renderNewCustomer(){
       <div class="field"><label>Title</label>
         <select id="ncTitle">
           <option value="">—</option>
-          <option>Mr</option><option>Mrs</option><option>Ms</option><option>Miss</option><option>Dr</option>
+          <option${editingJob && editingJob.title==='Mr' ? ' selected' : ''}>Mr</option>
+          <option${editingJob && editingJob.title==='Mrs' ? ' selected' : ''}>Mrs</option>
+          <option${editingJob && editingJob.title==='Ms' ? ' selected' : ''}>Ms</option>
+          <option${editingJob && editingJob.title==='Miss' ? ' selected' : ''}>Miss</option>
+          <option${editingJob && editingJob.title==='Dr' ? ' selected' : ''}>Dr</option>
         </select>
       </div>
-      <div class="field"><label>First name</label><input type="text" id="ncFirst"></div>
-      <div class="field"><label>Last name</label><input type="text" id="ncLast"></div>
-      <div class="field"><label>Email</label><input type="email" id="ncEmail" placeholder="name@example.com"></div>
+      <div class="field"><label>First name</label><input type="text" id="ncFirst" value="${editingJob ? escapeHtml(editingJob.firstName||'') : ''}"></div>
+      <div class="field"><label>Last name</label><input type="text" id="ncLast" value="${editingJob ? escapeHtml(editingJob.lastName||'') : ''}"></div>
+      <div class="field"><label>Phone number</label><input type="tel" id="ncPhone" placeholder="07…" value="${editingJob ? escapeHtml(editingJob.phone||'') : ''}"></div>
+      <div class="field"><label>Email</label><input type="email" id="ncEmail" placeholder="name@example.com" value="${editingJob ? escapeHtml(editingJob.email||'') : ''}"></div>
       <label style="display:flex;align-items:center;gap:10px;font-size:13.5px;font-weight:600;color:var(--ink-soft);">
-        <input type="checkbox" id="ncGateText" style="width:18px;height:18px;accent-color:var(--navy);">
-        Needs a text the night before to open their gate
+        <input type="checkbox" id="ncGateText" style="width:18px;height:18px;accent-color:var(--navy);"${editingJob && editingJob.needsGateText ? ' checked' : ''}>
+        Requires txt night before
       </label>
-      <div class="field" id="ncPhoneWrap" style="display:none;"><label>Phone number *</label><input type="tel" id="ncPhone" placeholder="07…"></div>
-      <div class="field"><label>Notes</label><textarea id="ncNotes" rows="2"></textarea></div>
+      <label style="display:flex;align-items:center;gap:10px;font-size:13.5px;font-weight:600;color:var(--ink-soft);">
+        <input type="checkbox" id="ncGocardless" style="width:18px;height:18px;accent-color:var(--navy);"${editingJob && editingJob.gocardless ? ' checked' : ''}>
+        Gocardless
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;font-size:13.5px;font-weight:600;color:var(--ink-soft);">
+        <input type="checkbox" id="ncInvoice" style="width:18px;height:18px;accent-color:var(--navy);"${editingJob && editingJob.invoice ? ' checked' : ''}>
+        Invoice
+      </label>
+      <div class="field"><label>Notes</label><textarea id="ncNotes" rows="2">${editingJob ? escapeHtml(editingJob.notes||'') : ''}</textarea></div>
 
-      <button class="btn btn-primary btn-block" id="ncSave" style="margin-top:6px;">Add to today's list</button>
+      <button class="btn btn-primary btn-block" id="ncSave" style="margin-top:6px;">${editJobId ? 'Save changes' : "Add to today's list"}</button>
       <div id="ncError" style="color:var(--red);font-size:13px;font-weight:600;"></div>
     </div>
   `;
   main.appendChild(card);
 
-  // auto-capture GPS location
-  let capturedLat = null, capturedLon = null;
+  // auto-capture GPS location — keeps the existing coordinates as a fallback when editing
+  let capturedLat = editingJob ? editingJob.lat : null;
+  let capturedLon = editingJob ? editingJob.lon : null;
   const geoStatus = card.querySelector('#ncGeoStatus');
   if('geolocation' in navigator){
     navigator.geolocation.getCurrentPosition(
@@ -1284,51 +1322,60 @@ async function renderNewCustomer(){
         geoStatus.textContent = '📍 Location captured — Navigate will work for this job.';
       },
       err=>{
-        geoStatus.textContent = '📍 Could not get location — Navigate will fall back to searching the address.';
+        geoStatus.textContent = editingJob && editingJob.lat != null ? '📍 Using the location saved earlier.' : '📍 Could not get location — Navigate will fall back to searching the address.';
       },
       { timeout: 10000 }
     );
   } else {
-    geoStatus.textContent = '📍 Location not available on this device — Navigate will fall back to searching the address.';
+    geoStatus.textContent = editingJob && editingJob.lat != null ? '📍 Using the location saved earlier.' : '📍 Location not available on this device — Navigate will fall back to searching the address.';
   }
 
   const freqSelect = card.querySelector('#ncFrequency');
-  freqSelect.addEventListener('change', ()=>{
-    card.querySelector('#ncFrequencyOtherWrap').style.display = freqSelect.value==='__other' ? '' : 'none';
-  });
-
   const gateCheck = card.querySelector('#ncGateText');
-  gateCheck.addEventListener('change', ()=>{
-    card.querySelector('#ncPhoneWrap').style.display = gateCheck.checked ? '' : 'none';
-  });
 
   card.querySelector('#ncSave').onclick = async ()=>{
     const errEl = card.querySelector('#ncError');
     errEl.textContent = '';
     const address = card.querySelector('#ncAddress').value.trim();
     const price = parseFloat(card.querySelector('#ncPrice').value);
-    let frequency = freqSelect.value;
-    if(frequency === '__other') frequency = card.querySelector('#ncFrequencyOther').value.trim();
+    const frequency = freqSelect.value;
     const round = card.querySelector('#ncRound').value.trim();
     const title = card.querySelector('#ncTitle').value;
     const firstName = card.querySelector('#ncFirst').value.trim();
     const lastName = card.querySelector('#ncLast').value.trim();
     const email = card.querySelector('#ncEmail').value.trim();
     const needsGateText = gateCheck.checked;
+    const gocardless = card.querySelector('#ncGocardless').checked;
+    const invoice = card.querySelector('#ncInvoice').checked;
     const phone = card.querySelector('#ncPhone').value.trim();
     const notes = card.querySelector('#ncNotes').value.trim();
 
     if(!address){ errEl.textContent = 'Address is required.'; return; }
     if(!price || price <= 0){ errEl.textContent = 'Enter a valid price.'; return; }
     if(!frequency){ errEl.textContent = 'Frequency is required.'; return; }
-    if(needsGateText && !phone){ errEl.textContent = 'Phone number is needed for the gate text.'; return; }
 
     const saveBtn = card.querySelector('#ncSave');
     saveBtn.disabled = true;
-    saveBtn.textContent = 'Adding…';
+    saveBtn.textContent = editJobId ? 'Saving…' : 'Adding…';
 
     const customerName = [title, firstName, lastName].filter(Boolean).join(' ') || '(new customer)';
     const jobs = (await loadJobs(worker, date)) || [];
+
+    if(editJobId){
+      const idx = jobs.findIndex(j=>j.id===editJobId);
+      if(idx !== -1){
+        jobs[idx] = Object.assign({}, jobs[idx], {
+          customer: customerName, address, phone, lat: capturedLat, lon: capturedLon,
+          round, price, frontPrice: Math.ceil(price/2 + 1), notes, frequency,
+          title, firstName, lastName, email, needsGateText, gocardless, invoice
+        });
+      }
+      await saveJobs(worker, date, jobs);
+      toast('New customer updated');
+      go(fromScreen, {worker, date});
+      return;
+    }
+
     const sameRound = jobs.filter(j=>round && j.round===round);
     const order = sameRound.length
       ? Math.max(...sameRound.map(j=>j.order)) + 0.5
@@ -1351,13 +1398,25 @@ async function renderNewCustomer(){
       timeRequired: '',
       frequency,
       isNewCustomer: true,
-      title, firstName, lastName, email, needsGateText
+      title, firstName, lastName, email, needsGateText, gocardless, invoice
     };
     jobs.push(newJob);
     await saveJobs(worker, date, jobs);
     toast('New customer added to the list');
     go('worker', {worker, date});
   };
+}
+
+// removes a new-customer job (and any progress recorded against it) entirely
+async function deleteNewCustomerJob(worker, date, jobId){
+  const jobs = (await loadJobs(worker, date)) || [];
+  const remaining = jobs.filter(j=>j.id !== jobId);
+  await saveJobs(worker, date, remaining);
+  const prog = await loadProgress(worker, date);
+  if(prog[jobId]){
+    delete prog[jobId];
+    await saveProgress(worker, date, prog);
+  }
 }
 
 
