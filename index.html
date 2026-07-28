@@ -712,13 +712,21 @@ function chargeForStatus(price, status){
 
 // report-table cell for what was actually charged today, flagging front-only prices
 function chargedCell(r){
+  if(r.status === 'todo') return `<td class="num">-</td>`;
   const charged = chargeForStatus(r.price, r.status);
-  const isFront = charged > 0.004 && Math.abs(r.price - r.job.frontPrice) < 0.005;
+  const isFront = charged > 0.004 && !!r.frontApplied;
   return `<td class="num">${isFront ? '<span class="badge badge-front">F</span> ' : ''}${money(charged)}</td>`;
+}
+
+// report-table cell for cash paid
+function paidCell(r){
+  if(r.status === 'todo') return `<td class="num">-</td>`;
+  return `<td class="num">${money(r.payment)}</td>`;
 }
 
 // report-table cell for the running balance after today, colour-coded like the job card
 function balanceCell(r){
+  if(r.status === 'todo') return `<td class="num">-</td>`;
   const bal = r.owedAfter;
   const color = bal > 0.004 ? 'var(--red)' : 'var(--green)';
   const val = bal > 0.004 ? bal : (bal < -0.004 ? -bal : 0);
@@ -1017,7 +1025,7 @@ function renderJobCard(worker,date,job,prog,refreshStats){
         ${job.notes ? `<div class="notes">⚠ ${escapeHtml(job.notes)}</div>` : ''}
       </div>
       <div class="price-block">
-        <button type="button" class="front" title="Tap to charge the front price instead">FO</button>
+        <button type="button" class="front" title="Tap to charge the front price instead"><span style="font-size:16px;">FO</span></button>
         <div class="price-edit"><span class="pfx">£</span><input type="number" class="price-input" inputmode="decimal" min="0" step="0.01" value="${parseFloat(priceVal).toFixed(2)}"></div>
       </div>
     </div>
@@ -1104,7 +1112,7 @@ function renderJobCard(worker,date,job,prog,refreshStats){
 
   function updateFrontButton(){
     const btn = card.querySelector('.front');
-    btn.textContent = frontApplied ? 'ALL' : 'FO';
+    btn.innerHTML = frontApplied ? 'ALL' : '<span style="font-size:16px;">FO</span>';
     btn.classList.toggle('front-active', frontApplied);
     btn.title = frontApplied ? 'Tap to charge for all the house windows instead' : 'Tap to charge the front-only price instead';
   }
@@ -1184,7 +1192,7 @@ async function renderDaySummary(){
     const debt = -j.balance;
     const owedAfter = debt + chargeForStatus(price,p.status) - payment;
     if(p.status !== 'cancelled') outstanding += owedAfter;
-    return {job:j,status:p.status,payment,price,note:p.note||'',owedAfter};
+    return {job:j,status:p.status,payment,price,note:p.note||'',owedAfter,frontApplied:!!p.frontApplied};
   });
 
   const card = document.createElement('div');
@@ -1210,7 +1218,7 @@ async function renderDaySummary(){
       <td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td>
       <td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span></td>
       ${chargedCell(r)}
-      <td class="num">${money(r.payment)}</td>
+      ${paidCell(r)}
       ${balanceCell(r)}
     </tr>`).join('');
   card2.innerHTML = `
@@ -1249,7 +1257,12 @@ function buildReportText(worker,date,rows,totals){
   lines.push(`Collected: ${money(totals.collected)}   Outstanding: ${money(totals.outstanding)}`);
   lines.push('');
   rows.forEach(r=>{
-    lines.push(`${r.job.customer} — ${r.status}, charged ${money(r.price)}${r.payment?`, paid ${money(r.payment)}`:''}${r.owedAfter>0.004?`, owes ${money(r.owedAfter)}`:''}${r.note?` — note: ${r.note}`:''}`);
+    if(r.status === 'todo'){
+      lines.push(`${r.job.customer} — ${statusLabel(r.status)}`);
+      return;
+    }
+    const charged = chargeForStatus(r.price, r.status);
+    lines.push(`${r.job.customer} — ${r.status}, charged ${money(charged)}${r.payment?`, paid ${money(r.payment)}`:''}${r.owedAfter>0.004?`, owes ${money(r.owedAfter)}`:''}${r.note?` — note: ${r.note}`:''}`);
   });
   return lines.join('\n');
 }
@@ -1529,7 +1542,7 @@ function renderAdminReport(main){
           const debt = -j.balance;
           const owedAfter = debt + chargeForStatus(price,p.status) - payment;
           if(p.status !== 'cancelled') outstanding += owedAfter;
-          allRows.push({worker:w,job:j,status:p.status,payment,price,note:p.note||'',owedAfter});
+          allRows.push({worker:w,job:j,status:p.status,payment,price,note:p.note||'',owedAfter,frontApplied:!!p.frontApplied});
         });
       });
       if(!totalJobs){ out.innerHTML = `<p class="muted">No job lists loaded for ${date} yet.</p>`; return; }
@@ -1557,7 +1570,7 @@ function renderAdminReport(main){
         <div class="section-title" style="margin-top:16px;">All jobs</div>
         <table class="report">
           <tr><th>Worker</th><th>Address</th><th>Status</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Today's balance</th></tr>
-          ${allRows.length ? allRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span></td>${chargedCell(r)}<td class="num">${money(r.payment)}</td>${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="6" class="muted">No jobs yet.</td></tr>`}
+          ${allRows.length ? allRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span></td>${chargedCell(r)}${paidCell(r)}${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="6" class="muted">No jobs yet.</td></tr>`}
         </table>
         <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
       `;
@@ -1581,7 +1594,7 @@ function renderAdminReport(main){
       const debt = -j.balance;
       const owedAfter = debt + chargeForStatus(price,p.status) - payment;
       if(p.status !== 'cancelled') outstanding += owedAfter;
-      return {job:j,status:p.status,payment,price,note:p.note||'',owedAfter};
+      return {job:j,status:p.status,payment,price,note:p.note||'',owedAfter,frontApplied:!!p.frontApplied};
     });
     out.innerHTML = `
       <table class="report">
@@ -1595,7 +1608,7 @@ function renderAdminReport(main){
       <div class="section-title" style="margin-top:16px;">Jobs</div>
       <table class="report">
         <tr><th>Address</th><th>Status</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Today's balance</th></tr>
-        ${rows.length ? rows.map(r=>`<tr><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span></td>${chargedCell(r)}<td class="num">${money(r.payment)}</td>${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="5" class="muted">No jobs yet.</td></tr>`}
+        ${rows.length ? rows.map(r=>`<tr><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span></td>${chargedCell(r)}${paidCell(r)}${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="5" class="muted">No jobs yet.</td></tr>`}
       </table>
       <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
     `;
