@@ -723,7 +723,7 @@ function chargedCell(r){
   const charged = chargeForStatus(r.price, r.status);
   const isFront = charged > 0.004 && !!r.frontApplied;
   const isAltered = !isFront && charged > 0.004 && Math.abs(charged - r.job.price) > 0.005;
-  const style = isAltered ? ` style="background:var(--blue-bg);color:var(--blue);font-weight:700;"` : '';
+  const style = isAltered ? ` style="color:var(--blue);font-weight:700;"` : '';
   return `<td class="num"${style}>${isFront ? '<span class="badge badge-front">F</span> ' : ''}${money(charged)}</td>`;
 }
 
