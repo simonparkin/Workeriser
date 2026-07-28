@@ -304,6 +304,7 @@
   .badge-skipped{background:#fbf3e0;color:var(--amber-deep);}
   .badge-cancelled{background:var(--red-bg);color:var(--red);}
   .badge-todo{background:var(--slate-bg);color:var(--ink-soft);}
+  .badge-front{background:var(--amber-deep);color:#fff;}
 
   .toast{
     position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
@@ -708,6 +709,21 @@ function resolvedPrice(job, p){
 // skipped/cancelled jobs weren't actually cleaned, so no charge applies for the day
 function chargeForStatus(price, status){
   return (status==='skipped' || status==='cancelled') ? 0 : price;
+}
+
+// report-table cell for what was actually charged today, flagging front-only prices
+function chargedCell(r){
+  const charged = chargeForStatus(r.price, r.status);
+  const isFront = charged > 0.004 && Math.abs(r.price - r.job.frontPrice) < 0.005;
+  return `<td class="num">${isFront ? '<span class="badge badge-front">F</span> ' : ''}${money(charged)}</td>`;
+}
+
+// report-table cell for the running balance after today, colour-coded like the job card
+function balanceCell(r){
+  const bal = r.owedAfter;
+  const color = bal > 0.004 ? 'var(--red)' : 'var(--green)';
+  const val = bal > 0.004 ? bal : (bal < -0.004 ? -bal : 0);
+  return `<td class="num"><b style="color:${color}">${money(val)}</b></td>`;
 }
 
 /* ================= RENDER ROUTER ================= */
@@ -1187,12 +1203,14 @@ async function renderDaySummary(){
     <tr>
       <td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td>
       <td><span class="badge badge-${r.status}">${r.status}</span></td>
+      ${chargedCell(r)}
       <td class="num">${money(r.payment)}</td>
+      ${balanceCell(r)}
     </tr>`).join('');
   card2.innerHTML = `
     <div class="section-title">Job by job</div>
     <table class="report">
-      <tr><th>Customer</th><th>Status</th><th class="num">Paid</th></tr>
+      <tr><th>Customer</th><th>Status</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Today's balance</th></tr>
       ${tableRows}
     </table>
   `;
@@ -1531,8 +1549,8 @@ function renderAdminReport(main){
         </table>
         <div class="section-title" style="margin-top:16px;">All completed jobs</div>
         <table class="report">
-          <tr><th>Worker</th><th>Address</th><th>Status</th><th class="num">Paid</th></tr>
-          ${completeRows.length ? completeRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${r.status}</span></td><td class="num">${money(r.payment)}</td></tr>`).join('') : `<tr><td colspan="4" class="muted">No completed jobs yet.</td></tr>`}
+          <tr><th>Worker</th><th>Address</th><th>Status</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Today's balance</th></tr>
+          ${completeRows.length ? completeRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${r.status}</span></td>${chargedCell(r)}<td class="num">${money(r.payment)}</td>${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="6" class="muted">No completed jobs yet.</td></tr>`}
         </table>
         <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
       `;
@@ -1568,8 +1586,8 @@ function renderAdminReport(main){
       </table>
       <div class="section-title" style="margin-top:16px;">Completed jobs</div>
       <table class="report">
-        <tr><th>Address</th><th>Status</th><th class="num">Paid</th></tr>
-        ${actionedRows.length ? actionedRows.map(r=>`<tr><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${r.status}</span></td><td class="num">${money(r.payment)}</td></tr>`).join('') : `<tr><td colspan="3" class="muted">No completed jobs yet.</td></tr>`}
+        <tr><th>Address</th><th>Status</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Today's balance</th></tr>
+        ${actionedRows.length ? actionedRows.map(r=>`<tr><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${r.status}</span></td>${chargedCell(r)}<td class="num">${money(r.payment)}</td>${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="5" class="muted">No completed jobs yet.</td></tr>`}
       </table>
       <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
     `;
