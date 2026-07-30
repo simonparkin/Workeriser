@@ -1626,7 +1626,7 @@ async function renderAdminUpload(main){
     <div class="stack">
       <div class="field"><label>Worker</label><select id="uWorker">${options}</select></div>
       <div class="field"><label>Date this job list is for</label><input type="date" id="uDate" value="${todayStr()}"></div>
-      <div class="field"><label>CSV file</label><input type="file" id="uFile" accept=".csv"></div>
+      <div class="field"><label>CSV file</label><input type="file" id="uFile" accept=".csv,*/*"></div>
       <button class="btn btn-primary btn-block" id="uGo">Load job list</button>
       <div id="uStatus"></div>
     </div>
@@ -1736,7 +1736,7 @@ async function renderAdminUpload(main){
     <div class="section-title">Coordinate reference</div>
     <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">Upload your "active, sorted by round order" export occasionally to keep GPS coordinates and round order on file. Daily job list CSVs don't carry this themselves — addresses are matched against this list automatically whenever you load a job list above.</p>
     <div class="note-box" style="margin:10px 0;">${addrCount ? `${addrCount} addresses on file${lookup.updatedAt ? ` · updated ${lookup.updatedAt}` : ''}` : 'No coordinate reference uploaded yet'}</div>
-    <div class="field"><label>active-round-order...csv</label><input type="file" id="cFile" accept=".csv"></div>
+    <div class="field"><label>active-round-order...csv</label><input type="file" id="cFile" accept=".csv,*/*"></div>
     <button class="btn btn-ghost btn-block" id="cGo" style="margin-top:10px;">Update coordinates</button>
     <div id="cStatus"></div>
   `;
