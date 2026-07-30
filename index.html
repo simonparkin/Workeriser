@@ -431,6 +431,16 @@ async function findAnyDateForWorker(worker){
   return meta.lastDate[worker] || null;
 }
 
+// super users can select/move jobs between anyone's list and see them rejected back to them.
+// stored as a list rather than hardcoded so it isn't tied to one specific person.
+async function loadSuperUsers(){
+  const list = await fsGet('super_users');
+  return (list && list.length) ? list : ['Simon'];
+}
+async function saveSuperUsers(list){
+  await fsSet('super_users', list);
+}
+
 // snapshots a worker's day before it's cleared, so historical reports survive
 // even after their live working list has been reset
 async function archiveBeforeClear(worker,date){
@@ -466,6 +476,7 @@ async function moveJobsToWorker(fromWorker, toWorker, date, jobIds){
   const toJobs = toJobsRaw || [];
   const toProg = toProgRaw || {};
   moving.forEach(j=>{
+    j.lastAssignedBy = fromWorker;
     toJobs.push(j);
     if(fromProg[j.id]){
       toProg[j.id] = fromProg[j.id];
@@ -849,7 +860,8 @@ async function renderWorker(){
   const worker = state.worker;
   const date = state.date || todayStr();
   state.date = date;
-  const [jobs, prog] = await Promise.all([loadJobs(worker,date), loadProgress(worker,date)]);
+  const [jobs, prog, superUsers] = await Promise.all([loadJobs(worker,date), loadProgress(worker,date), loadSuperUsers()]);
+  const isSuper = superUsers.includes(worker);
   app.innerHTML = '';
 
   const header = document.createElement('div');
@@ -862,7 +874,7 @@ async function renderWorker(){
       </div>
       <button class="topbar-btn" id="switchBtn">Switch</button>
       <button class="topbar-btn" id="newCustBtn" style="margin-left:8px;">New</button>
-      ${worker==='Simon' ? `<button class="topbar-btn" id="selectBtn" style="margin-left:8px;">Select</button>` : ''}
+      ${isSuper ? `<button class="topbar-btn" id="selectBtn" style="margin-left:8px;">Select</button>` : ''}
     </div>
     ${jobs && jobs.length ? `<div class="topbar-sub"><span id="topDoneStat"></span><span>Collected <b id="topCollectedStat"></b></span></div>` : ''}
   `;
@@ -912,7 +924,7 @@ async function renderWorker(){
         main.appendChild(rl);
         lastRound = job.round;
       }
-      const card = renderJobCard(worker,date,job,prog,refreshStats);
+      const card = renderJobCard(worker,date,job,prog,refreshStats,isSuper);
       main.appendChild(card);
       if(onCard) onCard(job, card);
     });
@@ -1044,7 +1056,7 @@ async function renderWorker(){
   startWorkerPoll(worker, date, jobs);
 }
 
-function renderJobCard(worker,date,job,prog,refreshStats){
+function renderJobCard(worker,date,job,prog,refreshStats,isSuper){
   const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'', frontApplied:false };
   const card = document.createElement('div');
   card.className = `card job-card status-${p.status}`;
@@ -1100,7 +1112,7 @@ function renderJobCard(worker,date,job,prog,refreshStats){
       <button type="button" class="nc-edit-btn" style="flex:1;background:transparent;border:1.5px dashed var(--blue);color:var(--blue);border-radius:9px;padding:7px 4px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Edit</button>
       <button type="button" class="nc-delete-btn" style="flex:1;background:transparent;border:1.5px dashed var(--red);color:var(--red);border-radius:9px;padding:7px 4px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Delete</button>
     </div>` : ''}
-    ${worker!=='Simon' && p.status==='todo' ? `<button type="button" class="reject-btn">Reject</button>` : ''}
+    ${!isSuper && p.status==='todo' ? `<button type="button" class="reject-btn">Reject</button>` : ''}
   `;
 
   const priceInput = card.querySelector('.price-input');
@@ -1154,8 +1166,13 @@ function renderJobCard(worker,date,job,prog,refreshStats){
     rejectBtn.onclick = async ()=>{
       rejectBtn.disabled = true;
       rejectBtn.textContent = 'Sending…';
-      await moveJobsToWorker(worker, 'Simon', date, [job.id]);
-      toast('Sent back to Simon');
+      let target = job.lastAssignedBy;
+      if(!target){
+        const superUsers = await loadSuperUsers();
+        target = superUsers[0] || 'Simon';
+      }
+      await moveJobsToWorker(worker, target, date, [job.id]);
+      toast(`Sent back to ${target}`);
       render();
     };
   }
@@ -1619,7 +1636,7 @@ async function renderAdmin(){
 
   if(tab==='upload') await renderAdminUpload(main);
   else if(tab==='report') renderAdminReport(main);
-  else renderAdminSettings(main);
+  else await renderAdminSettings(main);
 }
 
 async function renderAdminUpload(main){
@@ -1911,7 +1928,7 @@ function renderAdminReport(main){
   card.querySelector('#rGo').onclick = showReport;
 }
 
-function renderAdminSettings(main){
+async function renderAdminSettings(main){
   const card = document.createElement('div');
   card.className = 'card pad';
   card.innerHTML = `
@@ -1928,6 +1945,31 @@ function renderAdminSettings(main){
     if(!v){ toast('Enter a password'); return; }
     await setPassword(v);
     toast('Password updated');
+  };
+
+  const superCard = document.createElement('div');
+  superCard.className = 'card pad';
+  superCard.style.marginTop = '14px';
+  const currentSuperUsers = await loadSuperUsers();
+  superCard.innerHTML = `
+    <div class="section-title">Super users</div>
+    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">Super users can tap Select on their own list to move jobs to anyone else, and rejected jobs get sent back to the first person ticked below.</p>
+    <div class="stack" style="margin-top:10px;">
+      ${WORKERS.map(w=>`
+        <label style="display:flex;align-items:center;gap:10px;font-size:14px;font-weight:600;">
+          <input type="checkbox" class="super-user-check" value="${escapeHtml(w)}" style="width:18px;height:18px;accent-color:var(--navy);"${currentSuperUsers.includes(w) ? ' checked' : ''}>
+          ${escapeHtml(w)}
+        </label>
+      `).join('')}
+      <button class="btn btn-primary btn-block" id="saveSuperUsersBtn" style="margin-top:6px;">Save super users</button>
+    </div>
+  `;
+  main.appendChild(superCard);
+  superCard.querySelector('#saveSuperUsersBtn').onclick = async ()=>{
+    const checked = Array.from(superCard.querySelectorAll('.super-user-check:checked')).map(cb=>cb.value);
+    if(!checked.length){ toast('Pick at least one super user'); return; }
+    await saveSuperUsers(checked);
+    toast('Super users updated');
   };
 
   const wipe = document.createElement('div');
