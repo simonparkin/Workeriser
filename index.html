@@ -399,6 +399,11 @@ function todayStr(){
   const d = new Date();
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 }
+function tomorrowStr(){
+  const d = new Date();
+  d.setDate(d.getDate()+1);
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
 
 async function getPassword(){ const v = await fsGet('admin_pw'); return v || DEFAULT_ADMIN_PW; }
 async function setPassword(p){ await fsSet('admin_pw', p); }
@@ -1625,13 +1630,38 @@ async function renderAdminUpload(main){
     <div class="section-title">Upload a job list CSV</div>
     <div class="stack">
       <div class="field"><label>Worker</label><select id="uWorker">${options}</select></div>
-      <div class="field"><label>Date this job list is for</label><input type="date" id="uDate" value="${todayStr()}"></div>
+      <div class="field">
+        <label>Date this job list is for</label>
+        <div class="tab-row" id="uDateChoice" style="margin-bottom:0;">
+          <button type="button" class="tab-btn" data-choice="today">Today</button>
+          <button type="button" class="tab-btn active" data-choice="tomorrow">Tomorrow</button>
+          <button type="button" class="tab-btn" data-choice="pick">Pick a date</button>
+        </div>
+        <input type="date" id="uDate" value="${tomorrowStr()}" style="margin-top:8px;display:none;">
+      </div>
       <div class="field"><label>CSV file</label><input type="file" id="uFile" accept=".csv,*/*"></div>
       <button class="btn btn-primary btn-block" id="uGo">Load job list</button>
       <div id="uStatus"></div>
     </div>
   `;
   main.appendChild(card);
+
+  const dateChoiceBtns = card.querySelectorAll('#uDateChoice .tab-btn');
+  const dateInput = card.querySelector('#uDate');
+  let dateChoice = 'tomorrow';
+  function updateDateChoiceUI(){
+    dateChoiceBtns.forEach(b=>b.classList.toggle('active', b.dataset.choice===dateChoice));
+    dateInput.style.display = dateChoice==='pick' ? '' : 'none';
+  }
+  dateChoiceBtns.forEach(b=>{
+    b.onclick = ()=>{
+      dateChoice = b.dataset.choice;
+      if(dateChoice==='today') dateInput.value = todayStr();
+      else if(dateChoice==='tomorrow') dateInput.value = tomorrowStr();
+      updateDateChoiceUI();
+    };
+  });
+  updateDateChoiceUI();
 
   card.querySelector('#uWorker').addEventListener('change', ()=>{
     card.querySelector('#uFile').value = '';
