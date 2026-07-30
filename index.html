@@ -75,6 +75,11 @@
   .topbar-btn:active{background:rgba(255,255,255,.22);}
   .topbar-sub{margin-top:12px;display:flex;justify-content:space-between;align-items:baseline;color:#cfdce5;font-size:13px;}
   .topbar-sub b{color:#fff;font-weight:700;}
+  .topbar-datebar{margin-top:10px;display:flex;align-items:center;gap:8px;font-size:12.5px;color:#cfdce5;}
+  .topbar-datebar input[type=date]{
+    background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);color:#fff;
+    border-radius:7px;padding:4px 7px;font-size:12.5px;font-family:inherit;color-scheme:dark;
+  }
 
   /* ---------- generic ---------- */
   .main{flex:1;padding:18px 16px 100px;}
@@ -870,17 +875,25 @@ async function renderWorker(){
     <div class="topbar-row">
       <div class="brand">
         <div class="brand-mark">${worker[0]}</div>
-        <div class="brand-text"><div class="t1">Job list · ${date}</div><div class="t2">${worker}</div></div>
+        <div class="brand-text"><div class="t1">Job list</div><div class="t2">${worker}</div></div>
       </div>
       <button class="topbar-btn" id="switchBtn">Switch</button>
       <button class="topbar-btn" id="newCustBtn" style="margin-left:8px;">New</button>
       ${isSuper ? `<button class="topbar-btn" id="selectBtn" style="margin-left:8px;">Select</button>` : ''}
+    </div>
+    <div class="topbar-datebar">
+      <label for="dateSwitchInput">Viewing</label>
+      <input type="date" id="dateSwitchInput" value="${date}">
     </div>
     ${jobs && jobs.length ? `<div class="topbar-sub"><span id="topDoneStat"></span><span>Collected <b id="topCollectedStat"></b></span></div>` : ''}
   `;
   app.appendChild(header);
   header.querySelector('#switchBtn').onclick = ()=> go('login');
   header.querySelector('#newCustBtn').onclick = ()=> go('newCustomer', {worker, date, fromScreen:'worker'});
+  header.querySelector('#dateSwitchInput').addEventListener('change', (e)=>{
+    const newDate = e.target.value;
+    if(newDate && newDate !== date) go('worker', {worker, date: newDate});
+  });
 
   const main = document.createElement('div');
   main.className = 'main';
