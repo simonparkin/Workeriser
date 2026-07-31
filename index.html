@@ -141,12 +141,12 @@
   .job-card.status-skipped{border-color:#e6dab8;background:#fbf3e0;}
   .job-card.status-cancelled{border-color:#f0c9c9;background:var(--red-bg);opacity:.75;}
   .job-card.v-round{
-    border:2px solid var(--blue) !important;
+    border:2px solid var(--navy) !important;
     padding-top:38px;
   }
   .v-round-banner{
     position:absolute;top:0;left:0;right:0;height:26px;
-    background:var(--blue);color:#fff;
+    background:linear-gradient(160deg,var(--navy-deep),var(--navy));color:#fff;
     display:flex;align-items:center;justify-content:center;
     font-weight:800;font-size:12px;letter-spacing:.06em;text-transform:uppercase;
   }
@@ -462,6 +462,12 @@ async function archiveBeforeClear(worker,date){
   if(jobs && jobs.length){
     await fsSet(`report_${worker}_${date}`, { jobs, prog });
   }
+}
+
+// used instead of archiveBeforeClear when the day's data should be erased completely,
+// report included — e.g. test data, rather than real work being reset for a fresh start
+async function deleteReportSnapshot(worker,date){
+  await fsSet(`report_${worker}_${date}`, null);
 }
 
 // flips the visiting order for a whole day — last job becomes first and vice versa
@@ -1928,12 +1934,18 @@ async function renderAdminUpload(main){
     listEl.querySelectorAll('.clear-round-btn').forEach(btn=>{
       btn.onclick = async ()=>{
         const w = btn.dataset.worker, d = btn.dataset.date;
-        if(!confirm(`Clear ${w}'s job list for ${d}? Their report for that day is kept — this only resets their working list.`)) return;
+        if(!confirm(`Clear ${w}'s job list for ${d}?`)) return;
+        const eraseReport = confirm(`Also permanently delete the report for that day (e.g. this was test data)?\n\nOK = erase completely, including the report.\nCancel = keep the report — recommended for real work.`);
         btn.disabled = true;
-        await archiveBeforeClear(w, d);
+        btn.textContent = 'Clearing…';
+        if(eraseReport){
+          await deleteReportSnapshot(w, d);
+        } else {
+          await archiveBeforeClear(w, d);
+        }
         await saveJobs(w, d, []);
         await saveProgress(w, d, {});
-        toast(`Cleared ${w}'s job list — that day's report is still available`);
+        toast(eraseReport ? `Cleared ${w}'s job list and report completely` : `Cleared ${w}'s job list — that day's report is still available`);
         refreshLoadedRounds();
       };
     });
@@ -1980,12 +1992,10 @@ async function renderAdminUpload(main){
 async function renderAdminNotes(main){
   const card = document.createElement('div');
   card.className = 'card pad';
-  const options = WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
   card.innerHTML = `
     <div class="section-title">Job notes</div>
-    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">Add or edit notes on any worker's list for any date — handy for texts customers send ahead of time, without needing the worker to see or touch another day's list.</p>
+    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">Add or edit notes on any job for any date, across everyone's list at once — handy for texts customers send ahead of time, without needing a worker to see or touch another day's list.</p>
     <div class="stack" style="margin-top:10px;">
-      <div class="field"><label>Worker</label><select id="noWorker">${options}</select></div>
       <div class="field"><label>Date</label><input type="date" id="noDate" value="${tomorrowStr()}"></div>
       <button class="btn btn-primary btn-block" id="noGo">Load jobs</button>
     </div>
@@ -1994,19 +2004,24 @@ async function renderAdminNotes(main){
   main.appendChild(card);
 
   card.querySelector('#noGo').onclick = async ()=>{
-    const worker = card.querySelector('#noWorker').value;
     const date = card.querySelector('#noDate').value;
     const out = card.querySelector('#noOut');
     out.innerHTML = '<p class="muted">Loading…</p>';
-    const jobs = await loadJobs(worker,date);
-    if(!jobs || !jobs.length){ out.innerHTML = `<p class="muted">No job list loaded for ${worker} on ${date}.</p>`; return; }
-    const prog = await loadProgress(worker,date);
+
+    const results = await Promise.all(WORKERS.map(async w=>{
+      const jobs = await loadJobs(w,date);
+      const prog = (jobs && jobs.length) ? await loadProgress(w,date) : {};
+      return (jobs||[]).map(j=>({worker:w, job:j, prog}));
+    }));
+    const flat = results.flat();
+    if(!flat.length){ out.innerHTML = `<p class="muted">No job lists loaded for ${date} yet.</p>`; return; }
+
     const lookup = await loadCoordLookup();
-    const sorted = sortJobsByRoundOrder(jobs, lookup);
+    flat.sort((a,b)=> roundOrderRank(a.job,lookup) - roundOrderRank(b.job,lookup));
 
     out.innerHTML = '';
     let lastRound = null;
-    sorted.forEach(job=>{
+    flat.forEach(({worker, job, prog})=>{
       if(job.round && job.round !== lastRound){
         const rl = document.createElement('div');
         rl.className = 'round-label';
@@ -2021,7 +2036,7 @@ async function renderAdminNotes(main){
       row.style.marginBottom = '10px';
       row.innerHTML = `
         <div style="font-weight:700;font-size:14px;">${escapeHtml(job.address)}</div>
-        <div class="muted" style="font-size:12.5px;margin-bottom:8px;">${escapeHtml(job.customer)}</div>
+        <div class="muted" style="font-size:12.5px;margin-bottom:8px;">${escapeHtml(job.customer)} · <b>${escapeHtml(worker)}</b></div>
         <textarea rows="2" class="note-input" style="width:100%;border:1.5px solid var(--line);border-radius:9px;padding:8px 9px;font-size:13.5px;font-family:inherit;">${escapeHtml(p.note || '')}</textarea>
         <button type="button" class="btn btn-ghost note-save-btn" style="margin-top:8px;padding:7px 14px;font-size:13px;">Save note</button>
       `;
@@ -2148,8 +2163,20 @@ function renderAdminReport(main){
       </table>
       ${renderNewCustomerSection(rows)}
       <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
+      <button class="btn btn-ghost btn-block" id="rDelete" style="margin-top:10px;color:var(--red);border-color:var(--red);">Delete this report</button>
     `;
     out.querySelector('#rCsv').onclick = ()=> downloadReportCSV(worker,date,rows);
+    out.querySelector('#rDelete').onclick = async ()=>{
+      if(!confirm(`Permanently delete ${worker}'s report for ${date}? This can't be undone.`)) return;
+      const delBtn = out.querySelector('#rDelete');
+      delBtn.disabled = true;
+      delBtn.textContent = 'Deleting…';
+      await deleteReportSnapshot(worker, date);
+      await saveJobs(worker, date, []);
+      await saveProgress(worker, date, {});
+      toast(`Deleted ${worker}'s report for ${date}`);
+      showReport();
+    };
   }
   card.querySelector('#rGo').onclick = showReport;
 }
