@@ -75,11 +75,6 @@
   .topbar-btn:active{background:rgba(255,255,255,.22);}
   .topbar-sub{margin-top:12px;display:flex;justify-content:space-between;align-items:baseline;color:#cfdce5;font-size:13px;}
   .topbar-sub b{color:#fff;font-weight:700;}
-  .topbar-datebar{margin-top:10px;display:flex;align-items:center;gap:8px;font-size:12.5px;color:#cfdce5;}
-  .topbar-datebar input[type=date]{
-    background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);color:#fff;
-    border-radius:7px;padding:4px 7px;font-size:12.5px;font-family:inherit;color-scheme:dark;
-  }
 
   /* ---------- generic ---------- */
   .main{flex:1;padding:18px 16px 100px;}
@@ -145,6 +140,16 @@
   .job-card.status-done{border-color:#bfe3cd;background:var(--green-bg);}
   .job-card.status-skipped{border-color:#e6dab8;background:#fbf3e0;}
   .job-card.status-cancelled{border-color:#f0c9c9;background:var(--red-bg);opacity:.75;}
+  .job-card.v-round{
+    border:2px solid var(--blue) !important;
+    padding-top:38px;
+  }
+  .v-round-banner{
+    position:absolute;top:0;left:0;right:0;height:26px;
+    background:var(--blue);color:#fff;
+    display:flex;align-items:center;justify-content:center;
+    font-weight:800;font-size:12px;letter-spacing:.06em;text-transform:uppercase;
+  }
   .job-card.selectable{padding-left:44px;}
   .job-select-checkbox{
     position:absolute;top:16px;left:14px;width:20px;height:20px;z-index:5;accent-color:var(--navy);
@@ -594,8 +599,16 @@ function navUrl(job){
   return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(q)}`;
 }
 
+// rounds ending in a standalone "v" (e.g. "R) Ryhill 12 v") need a different completion
+// slip through the door — flagged visually on the job card regardless of who it's assigned to
+function isVRound(round){
+  if(!round) return false;
+  const parts = round.trim().split(/\s+/);
+  return parts.length > 0 && parts[parts.length-1].toLowerCase() === 'v';
+}
+
 /* ---- coordinate reference lookup (address -> lat/lon), updated occasionally ---- */
-async function loadCoordLookup(){ return (await fsGet('coord_lookup')) || { updatedAt:null, addresses:{}, roundOrder:[] }; }
+async function loadCoordLookup(){ return (await fsGet('coord_lookup')) || { updatedAt:null, addresses:{}, roundOrder:[], addressOrder:{} }; }
 async function saveCoordLookup(lookup){ await fsSet('coord_lookup', lookup); }
 
 function normAddr(a){
@@ -628,6 +641,33 @@ function buildRoundOrder(rows){
     }
   });
   return order;
+}
+
+// the reference CSV is exported in true visiting order (round, then position within round) —
+// capturing each address's row position lets us match Aworka's actual sequence exactly,
+// not just which round comes before which
+function buildAddressOrder(rows){
+  const order = {};
+  rows.forEach((r,idx)=>{
+    const addr = pick(r,['Job Address','Customer Address','Address']);
+    const n = normAddr(addr);
+    if(n && !(n in order)) order[n] = idx;
+  });
+  return order;
+}
+
+function findAddressRank(address, addressOrder){
+  const n = normAddr(address);
+  if(!n) return null;
+  if(addressOrder[n] !== undefined) return addressOrder[n];
+  let best = null, bestLen = 0;
+  for(const key in addressOrder){
+    if((key.includes(n) || n.includes(key)) && key.length > bestLen){
+      best = addressOrder[key];
+      bestLen = key.length;
+    }
+  }
+  return best;
 }
 
 function findCoordsForAddress(address, lookup){
@@ -790,6 +830,25 @@ function chargeForStatus(price, status){
   return (status==='skipped' || status==='cancelled') ? 0 : price;
 }
 
+// sorts jobs by the canonical round order (from the round-order reference file), falling
+// back to each job's own stored order within a round, or to the end if the round isn't
+// recognised at all — used to keep reports consistent even if a list's stored order has
+// drifted (e.g. after Reverse, or jobs moved in from elsewhere)
+// combines exact address position (Aworka's true visiting order, from the reference file)
+// with a round-grouped fallback for anything that isn't matched (e.g. brand new customers)
+function roundOrderRank(job, lookup){
+  const addrRank = findAddressRank(job.address, lookup.addressOrder || {});
+  if(addrRank !== null) return addrRank;
+  const roundOrder = lookup.roundOrder || [];
+  const rIdx = roundOrder.indexOf(job.round);
+  const rRank = rIdx === -1 ? Infinity : rIdx;
+  return rRank === Infinity ? Infinity : (rRank * 100000 + (job.order || 0));
+}
+
+function sortJobsByRoundOrder(jobs, lookup){
+  return jobs.slice().sort((a,b)=> roundOrderRank(a,lookup) - roundOrderRank(b,lookup));
+}
+
 // report-table cell for what was actually charged today, flagging front-only prices
 function chargedCell(r){
   if(r.status === 'todo') return `<td class="num">-</td>`;
@@ -950,25 +1009,17 @@ async function renderWorker(){
     <div class="topbar-row">
       <div class="brand">
         <div class="brand-mark">${worker[0]}</div>
-        <div class="brand-text"><div class="t1">Job list</div><div class="t2">${worker}</div></div>
+        <div class="brand-text"><div class="t1">Job list · ${date}</div><div class="t2">${worker}</div></div>
       </div>
       <button class="topbar-btn" id="switchBtn">Switch</button>
       <button class="topbar-btn" id="newCustBtn" style="margin-left:8px;">New</button>
       ${isSuper ? `<button class="topbar-btn" id="selectBtn" style="margin-left:8px;">Select</button>` : ''}
-    </div>
-    <div class="topbar-datebar">
-      <label for="dateSwitchInput">Viewing</label>
-      <input type="date" id="dateSwitchInput" value="${date}">
     </div>
     ${jobs && jobs.length ? `<div class="topbar-sub"><span id="topDoneStat"></span><span>Collected <b id="topCollectedStat"></b></span></div>` : ''}
   `;
   app.appendChild(header);
   header.querySelector('#switchBtn').onclick = ()=> go('login');
   header.querySelector('#newCustBtn').onclick = ()=> go('newCustomer', {worker, date, fromScreen:'worker'});
-  header.querySelector('#dateSwitchInput').addEventListener('change', (e)=>{
-    const newDate = e.target.value;
-    if(newDate && newDate !== date) go('worker', {worker, date: newDate});
-  });
 
   const main = document.createElement('div');
   main.className = 'main';
@@ -1147,7 +1198,8 @@ async function renderWorker(){
 function renderJobCard(worker,date,job,prog,refreshStats,isSuper){
   const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'', frontApplied:false };
   const card = document.createElement('div');
-  card.className = `card job-card status-${p.status}`;
+  const vRound = isVRound(job.round);
+  card.className = `card job-card status-${p.status}${vRound ? ' v-round' : ''}`;
 
   const debt = -job.balance; // positive = customer owes
   const priceVal = (p.price !== undefined && p.price !== '' && !isNaN(parseFloat(p.price))) ? p.price : job.price;
@@ -1155,6 +1207,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper){
 
   card.innerHTML = `
     <div class="wipe"></div>
+    ${vRound ? `<div class="v-round-banner">Vlado</div>` : ''}
     <div class="job-top">
       <div class="job-info">
         <div class="addr">${job.isNewCustomer ? '<span class="badge badge-new">NEW</span> ' : ''}${escapeHtml(job.address)}</div>
@@ -1236,7 +1289,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper){
         current.status = newStatus;
       });
       currentStatus = newStatus;
-      card.className = `card job-card status-${newStatus}`;
+      card.className = `card job-card status-${newStatus}${vRound ? ' v-round' : ''}`;
       card.querySelectorAll('.status-btn').forEach(b=>b.classList.remove('active-done','active-skipped','active-cancelled'));
       if(newStatus !== 'todo') btn.classList.add(`active-${newStatus}`);
       if(action==='done' && newStatus==='done'){
@@ -1550,8 +1603,11 @@ async function renderDaySummary(){
   main.className = 'main';
   app.appendChild(main);
 
+  const lookup = await loadCoordLookup();
+  const sortedJobs = sortJobsByRoundOrder(jobs, lookup);
+
   let collected=0, doneN=0, skippedN=0, cancelledN=0, notDoneN=0, outstanding=0;
-  const rows = jobs.slice().sort((a,b)=>a.order-b.order).map(j=>{
+  const rows = sortedJobs.map(j=>{
     const p = prog[j.id] || {status:'todo',payment:0};
     const payment = parseFloat(p.payment)||0;
     const price = resolvedPrice(j,p);
@@ -1720,7 +1776,7 @@ async function renderAdmin(){
   const tab = state.adminTab || 'upload';
   const tabs = document.createElement('div');
   tabs.className = 'tab-row';
-  [['upload','Upload'],['report','Reports'],['settings','Settings']].forEach(([k,label])=>{
+  [['upload','Upload'],['notes','Notes'],['report','Reports'],['settings','Settings']].forEach(([k,label])=>{
     const b = document.createElement('button');
     b.className = 'tab-btn' + (tab===k?' active':'');
     b.textContent = label;
@@ -1730,6 +1786,7 @@ async function renderAdmin(){
   main.appendChild(tabs);
 
   if(tab==='upload') await renderAdminUpload(main);
+  else if(tab==='notes') await renderAdminNotes(main);
   else if(tab==='report') renderAdminReport(main);
   else await renderAdminSettings(main);
 }
@@ -1907,9 +1964,10 @@ async function renderAdminUpload(main){
         const rows = parseCSV(e.target.result);
         const addresses = buildCoordAddresses(rows);
         const roundOrder = buildRoundOrder(rows);
+        const addressOrder = buildAddressOrder(rows);
         const count = Object.keys(addresses).length;
         if(!count){ toast('No coordinates found in that file'); return; }
-        await saveCoordLookup({ updatedAt: new Date().toLocaleDateString('en-GB'), addresses, roundOrder });
+        await saveCoordLookup({ updatedAt: new Date().toLocaleDateString('en-GB'), addresses, roundOrder, addressOrder });
         const { fixed, stillMissing } = await rescanAllRoundsForCoords();
         coordCard.querySelector('#cStatus').innerHTML = `<div class="note-box" style="margin-top:8px;">Saved ${count} addresses.${fixed ? ` Filled in coordinates for ${fixed} already-loaded job${fixed===1?'':'s'}.` : ''}${stillMissing ? ` ${stillMissing} job${stillMissing===1?'':'s'} still missing — check the address spelling matches.` : ''}</div>`;
         toast('Coordinate reference updated');
@@ -1918,6 +1976,73 @@ async function renderAdminUpload(main){
     reader.readAsText(file);
   };
 }
+
+async function renderAdminNotes(main){
+  const card = document.createElement('div');
+  card.className = 'card pad';
+  const options = WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
+  card.innerHTML = `
+    <div class="section-title">Job notes</div>
+    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">Add or edit notes on any worker's list for any date — handy for texts customers send ahead of time, without needing the worker to see or touch another day's list.</p>
+    <div class="stack" style="margin-top:10px;">
+      <div class="field"><label>Worker</label><select id="noWorker">${options}</select></div>
+      <div class="field"><label>Date</label><input type="date" id="noDate" value="${tomorrowStr()}"></div>
+      <button class="btn btn-primary btn-block" id="noGo">Load jobs</button>
+    </div>
+    <div id="noOut" style="margin-top:16px;"></div>
+  `;
+  main.appendChild(card);
+
+  card.querySelector('#noGo').onclick = async ()=>{
+    const worker = card.querySelector('#noWorker').value;
+    const date = card.querySelector('#noDate').value;
+    const out = card.querySelector('#noOut');
+    out.innerHTML = '<p class="muted">Loading…</p>';
+    const jobs = await loadJobs(worker,date);
+    if(!jobs || !jobs.length){ out.innerHTML = `<p class="muted">No job list loaded for ${worker} on ${date}.</p>`; return; }
+    const prog = await loadProgress(worker,date);
+    const lookup = await loadCoordLookup();
+    const sorted = sortJobsByRoundOrder(jobs, lookup);
+
+    out.innerHTML = '';
+    let lastRound = null;
+    sorted.forEach(job=>{
+      if(job.round && job.round !== lastRound){
+        const rl = document.createElement('div');
+        rl.className = 'round-label';
+        rl.style.marginTop = '18px';
+        rl.textContent = job.round;
+        out.appendChild(rl);
+        lastRound = job.round;
+      }
+      const p = prog[job.id] || {};
+      const row = document.createElement('div');
+      row.className = 'card pad';
+      row.style.marginBottom = '10px';
+      row.innerHTML = `
+        <div style="font-weight:700;font-size:14px;">${escapeHtml(job.address)}</div>
+        <div class="muted" style="font-size:12.5px;margin-bottom:8px;">${escapeHtml(job.customer)}</div>
+        <textarea rows="2" class="note-input" style="width:100%;border:1.5px solid var(--line);border-radius:9px;padding:8px 9px;font-size:13.5px;font-family:inherit;">${escapeHtml(p.note || '')}</textarea>
+        <button type="button" class="btn btn-ghost note-save-btn" style="margin-top:8px;padding:7px 14px;font-size:13px;">Save note</button>
+      `;
+      out.appendChild(row);
+      row.querySelector('.note-save-btn').onclick = async ()=>{
+        const btn = row.querySelector('.note-save-btn');
+        btn.disabled = true;
+        btn.textContent = 'Saving…';
+        const freshProg = await loadProgress(worker,date);
+        const current = freshProg[job.id] || {status:'todo',payment:'',price:'',note:'',frontApplied:false};
+        current.note = row.querySelector('.note-input').value;
+        freshProg[job.id] = current;
+        await saveProgress(worker,date,freshProg);
+        btn.disabled = false;
+        btn.textContent = 'Saved ✓';
+        setTimeout(()=>{ btn.textContent = 'Save note'; }, 1600);
+      };
+    });
+  };
+}
+
 
 function renderAdminReport(main){
   const card = document.createElement('div');
@@ -1965,17 +2090,7 @@ function renderAdminReport(main){
       });
       if(!totalJobs){ out.innerHTML = `<p class="muted">No job lists loaded for ${date} yet.</p>`; return; }
       const lookup = await loadCoordLookup();
-      const roundOrder = lookup.roundOrder || [];
-      function roundRank(roundName){
-        const idx = roundOrder.indexOf(roundName);
-        return idx === -1 ? Infinity : idx;
-      }
-      allRows.sort((a,b)=>{
-        const ra = roundRank(a.job.round), rb = roundRank(b.job.round);
-        if(ra !== rb) return ra - rb;
-        if(a.job.round !== b.job.round) return (a.job.round||'').localeCompare(b.job.round||'');
-        return a.job.order - b.job.order;
-      });
+      allRows.sort((a,b)=> roundOrderRank(a.job,lookup) - roundOrderRank(b.job,lookup));
       out.innerHTML = `
         <table class="report">
           <tr><td>Jobs done</td><td class="num">${doneN} / ${totalJobs}</td></tr>
@@ -2000,8 +2115,10 @@ function renderAdminReport(main){
     const { jobs, prog: progRaw } = await loadForReport(worker,date);
     if(!jobs || !jobs.length){ out.innerHTML = `<p class="muted">No job list loaded for ${worker} on ${date}.</p>`; return; }
     const prog = progRaw || {};
+    const lookup = await loadCoordLookup();
+    const sortedJobs = sortJobsByRoundOrder(jobs, lookup);
     let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0, notDoneN=0;
-    const rows = jobs.slice().sort((a,b)=>a.order-b.order).map(j=>{
+    const rows = sortedJobs.map(j=>{
       const p = prog[j.id] || {status:'todo',payment:0};
       const payment = parseFloat(p.payment)||0;
       const price = resolvedPrice(j,p);
