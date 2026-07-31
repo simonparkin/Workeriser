@@ -308,6 +308,10 @@
   table.report th{font-size:10.5px;text-transform:uppercase;color:var(--ink-soft);letter-spacing:.03em;}
   table.report td.num{text-align:right;font-weight:600;}
   table.report th.num{text-align:right;}
+  table.report .round-row{
+    background:var(--slate-bg);color:var(--navy);font-weight:700;font-size:10.5px;
+    text-transform:uppercase;letter-spacing:.03em;padding-top:9px;padding-bottom:6px;
+  }
   .badge{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;font-weight:700;}
   .badge-done{background:var(--green-bg);color:var(--green);}
   .badge-skipped{background:#fbf3e0;color:var(--amber-deep);}
@@ -699,7 +703,44 @@ function scheduleReflow(jobId, worker, date){
   cardTimers.set(jobId, t);
 }
 
-function go(screen, extra){ state = Object.assign({screen}, extra); render(); }
+function go(screen, extra){ state = Object.assign({screen}, extra); render(); saveSession(); }
+
+// Mobile browsers frequently unload a backgrounded tab/PWA from memory (e.g. when
+// switching to the Phone or WhatsApp) and silently reload it on return, wiping the
+// in-memory `state`. Persisting just who's logged in — not the date — lets the app
+// quietly resume the right person without them having to reselect, while still
+// defaulting to *today* the normal way. Restricted to the worker screen only, so a
+// reload can never resume straight into the password-protected admin area.
+const SESSION_KEY = 'wjt_session';
+const SESSION_MAX_AGE_MS = 8 * 60 * 60 * 1000; // 8 hours — same shift, not the next day
+function saveSession(){
+  try{
+    if(state.screen === 'worker' && state.worker){
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ worker: state.worker, savedAt: Date.now() }));
+    } else if(state.screen === 'login'){
+      localStorage.removeItem(SESSION_KEY);
+    }
+  }catch(e){ /* localStorage unavailable — fail silently, normal login still works */ }
+}
+function restoreSession(){
+  try{
+    const raw = localStorage.getItem(SESSION_KEY);
+    if(!raw) return null;
+    const saved = JSON.parse(raw);
+    const age = Date.now() - (saved.savedAt || 0);
+    if(saved.worker && age >= 0 && age < SESSION_MAX_AGE_MS) return saved.worker;
+  }catch(e){}
+  return null;
+}
+
+// If the page was just paused (not reloaded) while backgrounded, JS state survives
+// but the data on screen could be stale by the time the user comes back — refresh
+// immediately rather than waiting for the next background poll.
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState === 'visible' && (state.screen === 'worker' || state.screen === 'admin')){
+    render();
+  }
+});
 
 // Quietly checks every 15s for jobs added/removed by someone else (e.g. Simon
 // sending or reclaiming jobs) while a worker is sitting on their own list, and
@@ -776,12 +817,35 @@ function balanceCell(r){
   return `<td class="num" style="color:${color}">${money(val)}</td>`;
 }
 
+// like chargedCell, but shows the standard price for to-do jobs instead of dashing them out
+function priceCell(r){
+  if(r.status === 'todo') return `<td class="num">${money(r.price)}</td>`;
+  return chargedCell(r);
+}
+
+// compact tick/blank cash indicator, used where a full amount would take too much space
+function cashCell(r){
+  const paid = r.payment > 0.004;
+  return `<td class="num" style="text-align:center;">${paid ? '<span style="color:var(--green);font-weight:800;">✓</span>' : ''}</td>`;
+}
+
+// what they currently owe overall — includes today's price only if the job was actually
+// done today; skipped/cancelled/to-do jobs don't add today's charge to the balance
+function currentBalanceCell(r){
+  const debt = -r.job.balance;
+  const chargeToday = r.status === 'done' ? r.price : 0;
+  const bal = debt + chargeToday - r.payment;
+  const color = bal > 0.004 ? '#a97b7b' : '#7a9c8c';
+  const val = bal > 0.004 ? bal : (bal < -0.004 ? -bal : 0);
+  return `<td class="num" style="color:${color}">${money(val)}</td>`;
+}
+
 function statusLabel(status){
   return status === 'todo' ? 'Not done' : status;
 }
 
 // shared "new customers to add to Aworka" summary, used across all report views
-function renderNewCustomerSection(rows){
+function renderNewCustomerSection(rows, useToDoLabel){
   const newRows = rows.filter(r => r.job.isNewCustomer);
   if(!newRows.length) return '';
   return `
@@ -791,10 +855,11 @@ function renderNewCustomerSection(rows){
         const j = r.job;
         const name = [j.title, j.firstName, j.lastName].filter(Boolean).join(' ') || '(name not given)';
         const payMethods = [j.gocardless ? 'Gocardless' : '', j.invoice ? 'Invoice' : ''].filter(Boolean).join(', ');
+        const label = (useToDoLabel && r.status==='todo') ? 'To do' : statusLabel(r.status);
         return `
           <div style="padding:10px 0;border-bottom:1px solid var(--line);font-size:13px;line-height:1.6;">
             <b>${escapeHtml(name)}</b>${r.worker ? ` <span class="muted">(${escapeHtml(r.worker)})</span>` : ''} — ${escapeHtml(j.address)}<br>
-            Price: ${money(j.price)} · Frequency: ${escapeHtml(j.frequency||'—')} · Status: ${statusLabel(r.status)}<br>
+            Price: ${money(j.price)} · Frequency: ${escapeHtml(j.frequency||'—')} · Status: ${label}<br>
             ${j.email ? `Email: ${escapeHtml(j.email)}<br>` : ''}
             ${j.phone ? `Phone: ${escapeHtml(j.phone)}${j.needsGateText ? ' (requires txt night before)' : ''}<br>` : (j.needsGateText ? `Requires txt night before — no phone given<br>` : '')}
             ${payMethods ? `Payment: ${payMethods}<br>` : ''}
@@ -1501,8 +1566,37 @@ async function renderDaySummary(){
     return {job:j,status:p.status,payment,price,note:p.note||'',owedAfter,frontApplied:!!p.frontApplied};
   });
 
+  const card2 = document.createElement('div');
+  card2.className = 'card pad';
+  let lastRound = null;
+  let tableRows = '';
+  rows.forEach(r=>{
+    if(r.job.round && r.job.round !== lastRound){
+      tableRows += `<tr><td colspan="5" class="round-row">${escapeHtml(r.job.round)}</td></tr>`;
+      lastRound = r.job.round;
+    }
+    tableRows += `
+    <tr>
+      <td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td>
+      <td><span class="badge badge-${r.status}">${r.status==='todo' ? 'To do' : statusLabel(r.status)}</span></td>
+      ${priceCell(r)}
+      ${cashCell(r)}
+      ${currentBalanceCell(r)}
+    </tr>`;
+  });
+  card2.innerHTML = `
+    <div class="section-title">Job overview</div>
+    <table class="report">
+      <tr><th>Address</th><th>Status</th><th class="num">Price</th><th class="num">Cash</th><th class="num">Current balance</th></tr>
+      ${tableRows}
+    </table>
+  `;
+  main.appendChild(card2);
+  main.insertAdjacentHTML('beforeend', renderNewCustomerSection(rows, true));
+
   const card = document.createElement('div');
   card.className = 'card pad';
+  card.style.marginTop = '14px';
   card.innerHTML = `
     <div class="section-title">Today's totals</div>
     <table class="report">
@@ -1511,31 +1605,9 @@ async function renderDaySummary(){
       <tr><td>Cancelled</td><td class="num">${cancelledN}</td></tr>
       <tr><td>Not done</td><td class="num">${notDoneN}</td></tr>
       <tr><td>Cash collected</td><td class="num">${money(collected)}</td></tr>
-      <tr><td>Still outstanding</td><td class="num">${money(outstanding)}</td></tr>
     </table>
   `;
   main.appendChild(card);
-
-  const card2 = document.createElement('div');
-  card2.className = 'card pad';
-  card2.style.marginTop = '14px';
-  let tableRows = rows.map(r=>`
-    <tr>
-      <td>${escapeHtml(r.job.customer)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td>
-      <td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span></td>
-      ${chargedCell(r)}
-      ${paidCell(r)}
-      ${balanceCell(r)}
-    </tr>`).join('');
-  card2.innerHTML = `
-    <div class="section-title">Job by job</div>
-    <table class="report">
-      <tr><th>Customer</th><th>Status</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Balance</th></tr>
-      ${tableRows}
-    </table>
-  `;
-  main.appendChild(card2);
-  main.insertAdjacentHTML('beforeend', renderNewCustomerSection(rows));
 
   const btnRow = document.createElement('div');
   btnRow.className = 'stack';
@@ -2020,6 +2092,10 @@ async function renderAdminSettings(main){
 }
 
 /* ================= INIT ================= */
+{
+  const resumedWorker = restoreSession();
+  if(resumedWorker) state = { screen:'worker', worker: resumedWorker };
+}
 render();
 </script>
 </body>
