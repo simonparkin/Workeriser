@@ -1767,7 +1767,7 @@ async function renderAdmin(){
   const tab = state.adminTab || 'upload';
   const tabs = document.createElement('div');
   tabs.className = 'tab-row';
-  [['upload','Upload'],['notes','Notes'],['report','Reports'],['settings','Settings']].forEach(([k,label])=>{
+  [['upload','Upload'],['daymgmt','Day management'],['report','Reports'],['settings','Settings']].forEach(([k,label])=>{
     const b = document.createElement('button');
     b.className = 'tab-btn' + (tab===k?' active':'');
     b.textContent = label;
@@ -1777,7 +1777,7 @@ async function renderAdmin(){
   main.appendChild(tabs);
 
   if(tab==='upload') await renderAdminUpload(main);
-  else if(tab==='notes') await renderAdminNotes(main);
+  else if(tab==='daymgmt') await renderAdminDayManagement(main);
   else if(tab==='report') renderAdminReport(main);
   else await renderAdminSettings(main);
 }
@@ -1855,7 +1855,6 @@ async function renderAdminUpload(main){
           });
           if(changed) await saveProgress(worker,date,existingProg);
         }
-        await refreshLoadedRounds();
         let msg = `Loaded <b>${jobs.length}</b> jobs for <b>${worker}</b> on <b>${date}</b>.`;
         if(preSkipped.length){
           msg += ` ${preSkipped.length} marked as skipped from the file.`;
@@ -1876,66 +1875,6 @@ async function renderAdminUpload(main){
     };
     reader.readAsText(file);
   };
-
-  const existing = document.createElement('div');
-  existing.className = 'card pad';
-  existing.style.marginTop = '14px';
-  existing.innerHTML = `
-    <div class="section-title">Currently loaded job lists</div>
-    <div class="field" style="margin-bottom:4px;"><label>Check date</label><input type="date" id="loadedRoundsDate" value="${todayStr()}"></div>
-  `;
-  const listEl = document.createElement('div');
-  listEl.className = 'stack';
-  listEl.style.marginTop = '10px';
-  existing.appendChild(listEl);
-  main.appendChild(existing);
-
-  async function refreshLoadedRounds(){
-    const checkDate = existing.querySelector('#loadedRoundsDate').value || todayStr();
-    const rows = await Promise.all(WORKERS.map(async w=>{
-      const jobs = await loadJobs(w, checkDate);
-      return { w, d: checkDate, jobs };
-    }));
-    listEl.innerHTML = '';
-    rows.forEach(({w,d,jobs})=>{
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;font-size:13.5px;padding:8px 0;border-bottom:1px solid var(--line);gap:10px;';
-      row.innerHTML = `<span><b>${w}</b></span>
-        <span class="muted" style="text-align:right;">${jobs && jobs.length ? `${jobs.length} jobs` : 'nothing loaded'}</span>
-        ${jobs && jobs.length ? `<span style="display:flex;gap:6px;flex:none;">
-          <button type="button" class="reverse-order-btn" data-worker="${escapeHtml(w)}" data-date="${d}" style="background:transparent;border:1.5px solid var(--line);color:var(--navy);border-radius:8px;padding:5px 9px;font-size:12px;font-weight:700;cursor:pointer;">Reverse</button>
-          <button type="button" class="clear-round-btn" data-worker="${escapeHtml(w)}" data-date="${d}" style="background:transparent;border:1.5px solid var(--line);color:var(--red);border-radius:8px;padding:5px 9px;font-size:12px;font-weight:700;cursor:pointer;">Clear</button>
-        </span>` : ''}
-      `;
-      listEl.appendChild(row);
-    });
-    listEl.querySelectorAll('.reverse-order-btn').forEach(btn=>{
-      btn.onclick = async ()=>{
-        const w = btn.dataset.worker, d = btn.dataset.date;
-        if(!confirm(`Reverse ${w}'s job order for ${d}? Their next job will become their last, and vice versa.`)) return;
-        btn.disabled = true;
-        btn.textContent = 'Reversing…';
-        await reverseWorkOrder(w, d);
-        toast(`Reversed ${w}'s job order for ${d}`);
-        refreshLoadedRounds();
-      };
-    });
-    listEl.querySelectorAll('.clear-round-btn').forEach(btn=>{
-      btn.onclick = async ()=>{
-        const w = btn.dataset.worker, d = btn.dataset.date;
-        if(!confirm(`Clear ${w}'s job list for ${d}? This removes their jobs, progress, and report for that day completely — this can't be undone.`)) return;
-        btn.disabled = true;
-        btn.textContent = 'Clearing…';
-        await deleteReportSnapshot(w, d);
-        await saveJobs(w, d, []);
-        await saveProgress(w, d, {});
-        toast(`Cleared ${w}'s job list for ${d}`);
-        refreshLoadedRounds();
-      };
-    });
-  }
-  existing.querySelector('#loadedRoundsDate').addEventListener('change', refreshLoadedRounds);
-  await refreshLoadedRounds();
 
   const coordCard = document.createElement('div');
   coordCard.className = 'card pad';
@@ -1974,75 +1913,129 @@ async function renderAdminUpload(main){
   };
 }
 
-async function renderAdminNotes(main){
+async function renderAdminDayManagement(main){
   const card = document.createElement('div');
   card.className = 'card pad';
+  const options = `<option value="ALL">All workers</option>` + WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
   card.innerHTML = `
-    <div class="section-title">Job notes</div>
-    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">Add or edit notes on any job for any date, across everyone's list at once — handy for texts customers send ahead of time, without needing a worker to see or touch another day's list.</p>
+    <div class="section-title">Day management</div>
+    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">View and correct any worker's list for any date — add notes, adjust prices, fix statuses. Works for jobs still to come or already completed.</p>
     <div class="stack" style="margin-top:10px;">
-      <div class="field"><label>Date</label><input type="date" id="noDate" value="${tomorrowStr()}"></div>
-      <button class="btn btn-primary btn-block" id="noGo">Load jobs</button>
+      <div class="field"><label>Worker</label><select id="dmWorker">${options}</select></div>
+      <div class="field"><label>Date</label><input type="date" id="dmDate" value="${todayStr()}"></div>
+      <button class="btn btn-primary btn-block" id="dmGo">Load list</button>
     </div>
-    <div id="noOut" style="margin-top:16px;"></div>
   `;
   main.appendChild(card);
 
-  card.querySelector('#noGo').onclick = async ()=>{
-    const date = card.querySelector('#noDate').value;
-    const out = card.querySelector('#noOut');
+  const out = document.createElement('div');
+  out.style.marginTop = '14px';
+  main.appendChild(out);
+
+  async function loadAndRender(){
+    const worker = card.querySelector('#dmWorker').value;
+    const date = card.querySelector('#dmDate').value || todayStr();
     out.innerHTML = '<p class="muted">Loading…</p>';
 
-    const results = await Promise.all(WORKERS.map(async w=>{
-      const jobs = await loadJobs(w,date);
-      const prog = (jobs && jobs.length) ? await loadProgress(w,date) : {};
-      return (jobs||[]).map(j=>({worker:w, job:j, prog}));
-    }));
-    const flat = results.flat();
-    if(!flat.length){ out.innerHTML = `<p class="muted">No job lists loaded for ${date} yet.</p>`; return; }
+    if(worker === 'ALL'){
+      const results = await Promise.all(WORKERS.map(async w=>{
+        const jobs = await loadJobs(w,date);
+        const prog = (jobs && jobs.length) ? await loadProgress(w,date) : {};
+        return (jobs||[]).map(j=>({worker:w, job:j, prog}));
+      }));
+      const flat = results.flat();
+      if(!flat.length){
+        out.innerHTML = `<div class="card pad"><p class="muted">No job lists loaded for ${date} yet.</p></div>`;
+        return;
+      }
+      const lookup = await loadCoordLookup();
+      flat.sort((a,b)=> roundOrderRank(a.job,lookup) - roundOrderRank(b.job,lookup));
+      out.innerHTML = '';
 
+      const headerCard = document.createElement('div');
+      headerCard.className = 'card pad';
+      headerCard.innerHTML = `<div style="font-weight:700;">${flat.length} job${flat.length===1?'':'s'} across all workers · ${date}</div>`;
+      out.appendChild(headerCard);
+
+      const listWrap = document.createElement('div');
+      listWrap.style.marginTop = '14px';
+      out.appendChild(listWrap);
+
+      let lastRound = null;
+      flat.forEach(({worker:w, job, prog})=>{
+        if(job.round && job.round !== lastRound){
+          const rl = document.createElement('div');
+          rl.className = 'round-label';
+          rl.textContent = job.round;
+          listWrap.appendChild(rl);
+          lastRound = job.round;
+        }
+        const tag = document.createElement('div');
+        tag.style.cssText = 'font-size:11px;font-weight:800;color:var(--navy);text-transform:uppercase;letter-spacing:.04em;margin:10px 2px -2px 2px;';
+        tag.textContent = w;
+        listWrap.appendChild(tag);
+        listWrap.appendChild(renderJobCard(w, date, job, prog, null, true));
+      });
+      return;
+    }
+
+    const jobs = await loadJobs(worker,date);
+    if(!jobs || !jobs.length){
+      out.innerHTML = `<div class="card pad"><p class="muted">No job list loaded for ${escapeHtml(worker)} on ${date}. Upload one from the Upload tab.</p></div>`;
+      return;
+    }
+    const prog = await loadProgress(worker,date);
     const lookup = await loadCoordLookup();
-    flat.sort((a,b)=> roundOrderRank(a.job,lookup) - roundOrderRank(b.job,lookup));
-
+    const sorted = sortJobsByRoundOrder(jobs, lookup);
     out.innerHTML = '';
+
+    const headerCard = document.createElement('div');
+    headerCard.className = 'card pad';
+    headerCard.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div style="font-weight:700;">${jobs.length} job${jobs.length===1?'':'s'} · ${escapeHtml(worker)} · ${date}</div>
+        <div style="display:flex;gap:6px;">
+          <button type="button" id="dmReverse" style="background:transparent;border:1.5px solid var(--line);color:var(--navy);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:700;cursor:pointer;">Reverse order</button>
+          <button type="button" id="dmClear" style="background:transparent;border:1.5px solid var(--line);color:var(--red);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:700;cursor:pointer;">Clear</button>
+        </div>
+      </div>
+    `;
+    out.appendChild(headerCard);
+    headerCard.querySelector('#dmReverse').onclick = async ()=>{
+      if(!confirm(`Reverse ${worker}'s job order for ${date}? Their next job will become their last, and vice versa.`)) return;
+      await reverseWorkOrder(worker, date);
+      toast(`Reversed ${worker}'s job order for ${date}`);
+      loadAndRender();
+    };
+    headerCard.querySelector('#dmClear').onclick = async ()=>{
+      if(!confirm(`Clear ${worker}'s job list for ${date}? This removes their jobs, progress, and report for that day completely — this can't be undone.`)) return;
+      await deleteReportSnapshot(worker, date);
+      await saveJobs(worker, date, []);
+      await saveProgress(worker, date, {});
+      toast(`Cleared ${worker}'s job list for ${date}`);
+      loadAndRender();
+    };
+
+    const listWrap = document.createElement('div');
+    listWrap.style.marginTop = '14px';
+    out.appendChild(listWrap);
+
     let lastRound = null;
-    flat.forEach(({worker, job, prog})=>{
+    sorted.forEach(job=>{
       if(job.round && job.round !== lastRound){
         const rl = document.createElement('div');
         rl.className = 'round-label';
-        rl.style.marginTop = '18px';
         rl.textContent = job.round;
-        out.appendChild(rl);
+        listWrap.appendChild(rl);
         lastRound = job.round;
       }
-      const p = prog[job.id] || {};
-      const row = document.createElement('div');
-      row.className = 'card pad';
-      row.style.marginBottom = '10px';
-      row.innerHTML = `
-        <div style="font-weight:700;font-size:14px;">${escapeHtml(job.address)}</div>
-        <div class="muted" style="font-size:12.5px;margin-bottom:8px;">${escapeHtml(job.customer)} · <b>${escapeHtml(worker)}</b></div>
-        <textarea rows="2" class="note-input" style="width:100%;border:1.5px solid var(--line);border-radius:9px;padding:8px 9px;font-size:13.5px;font-family:inherit;">${escapeHtml(p.note || '')}</textarea>
-        <button type="button" class="btn btn-ghost note-save-btn" style="margin-top:8px;padding:7px 14px;font-size:13px;">Save note</button>
-      `;
-      out.appendChild(row);
-      row.querySelector('.note-save-btn').onclick = async ()=>{
-        const btn = row.querySelector('.note-save-btn');
-        btn.disabled = true;
-        btn.textContent = 'Saving…';
-        const freshProg = await loadProgress(worker,date);
-        const current = freshProg[job.id] || {status:'todo',payment:'',price:'',note:'',frontApplied:false};
-        current.note = row.querySelector('.note-input').value;
-        freshProg[job.id] = current;
-        await saveProgress(worker,date,freshProg);
-        btn.disabled = false;
-        btn.textContent = 'Saved ✓';
-        setTimeout(()=>{ btn.textContent = 'Save note'; }, 1600);
-      };
+      // isSuper=true hides the Reject button, which is meant for field workers, not admin edits
+      listWrap.appendChild(renderJobCard(worker, date, job, prog, null, true));
     });
-  };
-}
+  }
 
+  card.querySelector('#dmGo').onclick = loadAndRender;
+}
 
 function renderAdminReport(main){
   const card = document.createElement('div');
