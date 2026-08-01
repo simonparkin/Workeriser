@@ -1186,7 +1186,7 @@ async function renderWorker(){
   startWorkerPoll(worker, date, jobs);
 }
 
-function renderJobCard(worker,date,job,prog,refreshStats,isSuper){
+function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned){
   const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'', frontApplied:false };
   const card = document.createElement('div');
   const vRound = isVRound(job.round);
@@ -1239,6 +1239,13 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper){
       <label>Job note</label>
       <textarea rows="2">${escapeHtml(p.note || '')}</textarea>
     </div>
+    ${onReassigned ? `
+    <div class="field" style="margin-top:10px;">
+      <label>Assigned to</label>
+      <select class="reassign-select">
+        ${WORKERS.map(w=>`<option value="${escapeHtml(w)}"${w===worker?' selected':''}>${escapeHtml(w)}</option>`).join('')}
+      </select>
+    </div>` : ''}
     ${job.isNewCustomer ? `
     <div style="display:flex;gap:8px;margin-top:8px;">
       <button type="button" class="nc-edit-btn" style="flex:1;background:transparent;border:1.5px dashed var(--blue);color:var(--blue);border-radius:9px;padding:7px 4px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Edit</button>
@@ -1307,6 +1314,18 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper){
       toast(`Sent back to ${target}`);
       render();
     };
+  }
+
+  const reassignSelect = card.querySelector('.reassign-select');
+  if(reassignSelect){
+    reassignSelect.addEventListener('change', async ()=>{
+      const newWorker = reassignSelect.value;
+      if(newWorker === worker) return;
+      reassignSelect.disabled = true;
+      await moveJobsToWorker(worker, newWorker, date, [job.id]);
+      toast(`Moved to ${newWorker}`);
+      onReassigned();
+    });
   }
 
   const ncEditBtn = card.querySelector('.nc-edit-btn');
@@ -1974,7 +1993,7 @@ async function renderAdminDayManagement(main){
         tag.style.cssText = 'font-size:11px;font-weight:800;color:var(--navy);text-transform:uppercase;letter-spacing:.04em;margin:10px 2px -2px 2px;';
         tag.textContent = w;
         listWrap.appendChild(tag);
-        listWrap.appendChild(renderJobCard(w, date, job, prog, null, true));
+        listWrap.appendChild(renderJobCard(w, date, job, prog, null, true, loadAndRender));
       });
       return;
     }
@@ -2030,7 +2049,7 @@ async function renderAdminDayManagement(main){
         lastRound = job.round;
       }
       // isSuper=true hides the Reject button, which is meant for field workers, not admin edits
-      listWrap.appendChild(renderJobCard(worker, date, job, prog, null, true));
+      listWrap.appendChild(renderJobCard(worker, date, job, prog, null, true, loadAndRender));
     });
   }
 
