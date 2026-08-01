@@ -1989,10 +1989,6 @@ async function renderAdminDayManagement(main){
           listWrap.appendChild(rl);
           lastRound = job.round;
         }
-        const tag = document.createElement('div');
-        tag.style.cssText = 'font-size:11px;font-weight:800;color:var(--navy);text-transform:uppercase;letter-spacing:.04em;margin:10px 2px -2px 2px;';
-        tag.textContent = w;
-        listWrap.appendChild(tag);
         listWrap.appendChild(renderJobCard(w, date, job, prog, null, true, loadAndRender));
       });
       return;
