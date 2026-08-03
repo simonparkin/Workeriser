@@ -793,6 +793,40 @@ function startWorkerPoll(worker, date, currentJobs){
   }, 15000);
 }
 
+// Invisible full-screen "wake" cover for the worker's own job list, to cut down on
+// accidental button presses (phone in a pocket/bag, brushed against something, etc).
+// A single tap anywhere dismisses it without triggering whatever's underneath; it
+// silently re-arms after 3s with no activity of any kind (taps, scrolling, typing).
+let guardEl = null;
+let guardTimer = null;
+function resetGuardTimer(){
+  if(guardTimer) clearTimeout(guardTimer);
+  guardTimer = setTimeout(()=>{
+    if(state.screen === 'worker' && guardEl) guardEl.style.display = 'block';
+  }, 3000);
+}
+function armScreenGuard(){
+  if(!guardEl){
+    guardEl = document.createElement('div');
+    guardEl.id = 'screenGuard';
+    guardEl.style.cssText = 'position:fixed;inset:0;z-index:9999;background:transparent;';
+    document.body.appendChild(guardEl);
+    guardEl.addEventListener('click', ()=>{ guardEl.style.display = 'none'; resetGuardTimer(); }, {passive:true});
+    guardEl.addEventListener('touchstart', ()=>{ guardEl.style.display = 'none'; resetGuardTimer(); }, {passive:true});
+    ['click','input','scroll','touchstart','keydown'].forEach(evt=>{
+      document.addEventListener(evt, ()=>{
+        if(state.screen === 'worker') resetGuardTimer();
+      }, {passive:true, capture:true});
+    });
+  }
+  guardEl.style.display = 'none'; // starts open; only arms after 3s of inactivity
+  resetGuardTimer();
+}
+function stopScreenGuard(){
+  if(guardTimer) clearTimeout(guardTimer);
+  if(guardEl) guardEl.style.display = 'none';
+}
+
 function toast(msg){
   const t = document.createElement('div');
   t.className = 'toast';
@@ -932,6 +966,7 @@ async function render(){
   }
   lastScreenRendered = state.screen;
   app.classList.toggle('admin-wide', state.screen==='admin' || state.screen==='adminLogin');
+  if(state.screen !== 'worker') stopScreenGuard();
   if(state.screen==='login') await renderLogin();
   else if(state.screen==='worker') await renderWorker();
   else if(state.screen==='daySummary') await renderDaySummary();
@@ -1184,6 +1219,7 @@ async function renderWorker(){
 
   refreshStats();
   startWorkerPoll(worker, date, jobs);
+  armScreenGuard();
 }
 
 function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned){
@@ -1266,7 +1302,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned){
     const owedAfter = debt + chargeToday - payment;
     const el = card.querySelector('.balance-value');
     if(owedAfter > 0.004) el.innerHTML = `<b style="color:var(--red)">${money(owedAfter)}</b>`;
-    else if(owedAfter < -0.004) el.innerHTML = `<b style="color:var(--green)">${money(-owedAfter)}</b>`;
+    else if(owedAfter < -0.004) el.innerHTML = `<b style="color:var(--green)">${money(-owedAfter)} credit</b>`;
     else el.innerHTML = `<b style="color:var(--green)">£0.00</b>`;
   }
   updateOwedAfter();
