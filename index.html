@@ -214,6 +214,13 @@
     cursor:pointer;font-family:inherit;padding:2px;
   }
   .price-block .front.front-active{background:var(--amber-deep);color:#fff;}
+  .debt-knock-badge{
+    flex:none;width:46px;height:46px;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    background:var(--red);color:#fff;border:2px solid var(--red);border-radius:11px;
+    font-size:9px;font-weight:800;letter-spacing:.02em;line-height:1.2;text-align:center;
+    text-transform:uppercase;
+  }
 
   .job-controls{display:flex;gap:8px;margin-top:14px;}
   .status-btn{
@@ -1252,6 +1259,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned){
         ${job.notes ? `<div class="notes">⚠ ${escapeHtml(job.notes)}</div>` : ''}
       </div>
       <div class="price-block">
+        <div class="debt-knock-badge" style="display:none;"><div>DEBT</div><div>KNOCK</div></div>
         <button type="button" class="front" title="Tap to charge the front price instead"><span style="font-size:16px;">FO</span></button>
         <div class="price-edit"><span class="pfx">£</span><input type="number" class="price-input" inputmode="decimal" min="0" step="0.01" value="${parseFloat(priceVal).toFixed(2)}"></div>
       </div>
@@ -1304,6 +1312,10 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned){
     if(owedAfter > 0.004) el.innerHTML = `<b style="color:var(--red)">${money(owedAfter)}</b>`;
     else if(owedAfter < -0.004) el.innerHTML = `<b style="color:var(--green)">${money(-owedAfter)} credit</b>`;
     else el.innerHTML = `<b style="color:var(--green)">£0.00</b>`;
+
+    const priceRef = currentPrice();
+    const showDebtKnock = owedAfter > 0.004 && priceRef > 0.004 && owedAfter >= 4 * priceRef;
+    card.querySelector('.debt-knock-badge').style.display = showDebtKnock ? 'flex' : 'none';
   }
   updateOwedAfter();
 
