@@ -139,7 +139,8 @@
   }
   .job-card.status-done{border-color:#bfe3cd;background:var(--green-bg);}
   .job-card.status-skipped{border-color:#e6dab8;background:#fbf3e0;}
-  .job-card.status-cancelled{border-color:#f0c9c9;background:var(--red-bg);opacity:.75;}
+  .job-card.is-cancelled{border-left:4px solid var(--red);}
+  .job-card.is-cancelled .cust,.job-card.is-cancelled .addr{text-decoration:line-through;}
   .job-card.v-round{
     border:2px solid var(--navy) !important;
     padding-top:38px;
@@ -190,7 +191,6 @@
   }
   .nav-btn:active{background:var(--navy-deep);}
   .job-info .notes{font-size:12.5px;color:var(--amber-deep);margin-top:6px;font-weight:600;}
-  .job-card.status-cancelled .cust,.job-card.status-cancelled .addr{text-decoration:line-through;}
 
   .price-block{display:flex;align-items:center;gap:10px;flex:none;}
   .price-edit{display:flex;align-items:center;justify-content:flex-end;gap:2px;}
@@ -331,6 +331,12 @@
   .badge-todo{background:var(--slate-bg);color:var(--ink-soft);}
   .badge-front{background:var(--amber-deep);color:#fff;}
   .badge-new{background:var(--blue);color:#fff;}
+
+  .dialog-overlay{
+    position:fixed;inset:0;background:rgba(10,37,64,.55);z-index:10000;
+    display:flex;align-items:center;justify-content:center;padding:20px;
+  }
+  .dialog-box{max-width:360px;width:100%;}
 
   .toast{
     position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
@@ -859,7 +865,7 @@ function resolvedPrice(job, p){
 
 // skipped/cancelled jobs weren't actually cleaned, so no charge applies for the day
 function chargeForStatus(price, status){
-  return (status==='skipped' || status==='cancelled') ? 0 : price;
+  return status==='skipped' ? 0 : price;
 }
 
 // sorts jobs by the canonical round order (from the round-order reference file), falling
@@ -935,6 +941,11 @@ function statusLabel(status){
   return status === 'todo' ? 'Not done' : status;
 }
 
+// cancelled is now independent of status, so it needs its own badge alongside the status one
+function cancelledBadge(cancelled){
+  return cancelled ? ' <span class="badge badge-cancelled">cancelled</span>' : '';
+}
+
 // shared "new customers to add to Aworka" summary, used across all report views
 function renderNewCustomerSection(rows, useToDoLabel){
   const newRows = rows.filter(r => r.job.isNewCustomer);
@@ -950,7 +961,7 @@ function renderNewCustomerSection(rows, useToDoLabel){
         return `
           <div style="padding:10px 0;border-bottom:1px solid var(--line);font-size:13px;line-height:1.6;">
             <b>${escapeHtml(name)}</b>${r.worker ? ` <span class="muted">(${escapeHtml(r.worker)})</span>` : ''} — ${escapeHtml(j.address)}<br>
-            Price: ${money(j.price)} · Frequency: ${escapeHtml(j.frequency||'—')} · Status: ${label}<br>
+            Price: ${money(j.price)} · Frequency: ${escapeHtml(j.frequency||'—')} · Status: ${label}${r.cancelled ? ' · Cancelled' : ''}<br>
             ${j.email ? `Email: ${escapeHtml(j.email)}<br>` : ''}
             ${j.phone ? `Phone: ${escapeHtml(j.phone)}${j.needsGateText ? ' (requires txt night before)' : ''}<br>` : (j.needsGateText ? `Requires txt night before — no phone given<br>` : '')}
             ${payMethods ? `Payment: ${payMethods}<br>` : ''}
@@ -1082,6 +1093,51 @@ async function renderWorker(){
     if(collEl) collEl.textContent = money(collected);
   }
 
+  async function checkDanglingCancelled(justChangedJobId){
+    const freshProg = await loadProgress(worker, date);
+    const dangling = jobs.find(j => j.id !== justChangedJobId && freshProg[j.id] && freshProg[j.id].cancelled && freshProg[j.id].status === 'todo');
+    if(dangling) showDanglingCancelledDialog(dangling);
+  }
+
+  function showDanglingCancelledDialog(job){
+    if(document.getElementById('danglingCancelledDialog')) return; // don't stack multiple
+    const overlay = document.createElement('div');
+    overlay.id = 'danglingCancelledDialog';
+    overlay.className = 'dialog-overlay';
+    overlay.innerHTML = `
+      <div class="card pad dialog-box">
+        <div class="section-title" style="color:var(--red);">Cancelled job needs finishing</div>
+        <p style="font-size:13.5px;line-height:1.5;margin:8px 0 14px;"><b>${escapeHtml(job.address)}</b> was marked Cancelled but never marked Done or Skipped for today. Which was it?</p>
+        <div class="stack">
+          <button class="btn btn-primary btn-block" id="dlgDone">Mark Done</button>
+          <button class="btn btn-ghost btn-block" id="dlgSkipped">Mark Skipped</button>
+          <button class="btn btn-ghost btn-block" id="dlgDismiss" style="color:var(--ink-soft);">Leave for now</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    const close = ()=> overlay.remove();
+    overlay.querySelector('#dlgDone').onclick = async ()=>{
+      await setJobStatusFlag(job.id, 'done');
+      close();
+      render();
+    };
+    overlay.querySelector('#dlgSkipped').onclick = async ()=>{
+      await setJobStatusFlag(job.id, 'skipped');
+      close();
+      render();
+    };
+    overlay.querySelector('#dlgDismiss').onclick = close;
+  }
+
+  async function setJobStatusFlag(jobId, status){
+    const freshProg = await loadProgress(worker, date);
+    const current = freshProg[jobId] || {status:'todo',payment:'',price:'',note:'',frontApplied:false,cancelled:false};
+    current.status = status;
+    freshProg[jobId] = current;
+    await saveProgress(worker, date, freshProg);
+  }
+
   const sorted = jobs.slice().sort((a,b)=>a.order-b.order);
   const todoJobs = sorted.filter(j=> !prog[j.id] || prog[j.id].status==='todo');
   const completedJobs = sorted.filter(j=> prog[j.id] && prog[j.id].status!=='todo');
@@ -1096,7 +1152,7 @@ async function renderWorker(){
         main.appendChild(rl);
         lastRound = job.round;
       }
-      const card = renderJobCard(worker,date,job,prog,refreshStats,isSuper);
+      const card = renderJobCard(worker,date,job,prog,refreshStats,isSuper,null,checkDanglingCancelled);
       main.appendChild(card);
       if(onCard) onCard(job, card);
     });
@@ -1229,11 +1285,11 @@ async function renderWorker(){
   armScreenGuard();
 }
 
-function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned){
-  const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'', frontApplied:false };
+function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,onAnyStatusChange){
+  const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'', frontApplied:false, cancelled:false };
   const card = document.createElement('div');
   const vRound = isVRound(job.round);
-  card.className = `card job-card status-${p.status}${vRound ? ' v-round' : ''}`;
+  card.className = `card job-card status-${p.status}${vRound ? ' v-round' : ''}${p.cancelled ? ' is-cancelled' : ''}`;
 
   const debt = -job.balance; // positive = customer owes
   const priceVal = (p.price !== undefined && p.price !== '' && !isNaN(parseFloat(p.price))) ? p.price : job.price;
@@ -1267,7 +1323,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned){
     <div class="job-controls">
       <button class="status-btn ${p.status==='done'?'active-done':''}" data-action="done"><span class="ic">✓</span>Done</button>
       <button class="status-btn ${p.status==='skipped'?'active-skipped':''}" data-action="skipped"><span class="ic">↷</span>Skipped</button>
-      <button class="status-btn ${p.status==='cancelled'?'active-cancelled':''}" data-action="cancelled"><span class="ic">✕</span>Cancelled</button>
+      <button class="status-btn ${p.cancelled?'active-cancelled':''}" data-action="cancelled"><span class="ic">✕</span>Cancelled</button>
     </div>
     <div class="pay-row">
       <div class="pay-field">
@@ -1275,7 +1331,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned){
         <div class="pay-input-wrap"><span class="pfx">£</span><input type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${p.payment || ''}" class="pay-input"></div>
       </div>
       <div class="pay-field">
-        <label>Today's balance</label>
+        <label class="balance-label">Today's balance</label>
         <div class="balance-value"></div>
       </div>
     </div>
@@ -1301,14 +1357,18 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned){
   const priceInput = card.querySelector('.price-input');
   const payInput = card.querySelector('.pay-input');
   let currentStatus = p.status;
+  let currentCancelled = !!p.cancelled;
 
   function currentPrice(){ return parseFloat(priceInput.value) || 0; }
 
   function updateOwedAfter(){
     const payment = parseFloat(payInput.value) || 0;
-    const chargeToday = (currentStatus==='skipped' || currentStatus==='cancelled') ? 0 : currentPrice();
+    const notCleaned = currentStatus === 'skipped';
+    const chargeToday = notCleaned ? 0 : currentPrice();
     const owedAfter = debt + chargeToday - payment;
     const el = card.querySelector('.balance-value');
+    const labelEl = card.querySelector('.balance-label');
+    if(labelEl) labelEl.textContent = notCleaned ? 'Current balance' : "Today's balance";
     if(owedAfter > 0.004) el.innerHTML = `<b style="color:var(--red)">${money(owedAfter)}</b>`;
     else if(owedAfter < -0.004) el.innerHTML = `<b style="color:var(--green)">${money(-owedAfter)} credit</b>`;
     else el.innerHTML = `<b style="color:var(--green)">£0.00</b>`;
@@ -1320,7 +1380,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned){
   updateOwedAfter();
 
   async function persist(mutator){
-    const current = prog[job.id] ? Object.assign({}, prog[job.id]) : {status:'todo',payment:'',price:'',note:'',frontApplied:false};
+    const current = prog[job.id] ? Object.assign({}, prog[job.id]) : {status:'todo',payment:'',price:'',note:'',frontApplied:false,cancelled:false};
     mutator(current);
     prog[job.id] = current;
     await saveProgress(worker,date,prog);
@@ -1329,15 +1389,24 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned){
   card.querySelectorAll('.status-btn').forEach(btn=>{
     btn.onclick = async ()=>{
       const action = btn.dataset.action;
-      let newStatus;
+      let newStatus = currentStatus;
+      let newCancelled = currentCancelled;
+      if(action === 'cancelled'){
+        newCancelled = !currentCancelled; // purely independent now — doesn't touch status
+      } else {
+        newStatus = currentStatus === action ? 'todo' : action; // Done/Skipped stay mutually exclusive
+      }
       await persist(current=>{
-        newStatus = current.status === action ? 'todo' : action;
         current.status = newStatus;
+        current.cancelled = newCancelled;
       });
       currentStatus = newStatus;
-      card.className = `card job-card status-${newStatus}${vRound ? ' v-round' : ''}`;
-      card.querySelectorAll('.status-btn').forEach(b=>b.classList.remove('active-done','active-skipped','active-cancelled'));
-      if(newStatus !== 'todo') btn.classList.add(`active-${newStatus}`);
+      currentCancelled = newCancelled;
+      card.className = `card job-card status-${newStatus}${vRound ? ' v-round' : ''}${newCancelled ? ' is-cancelled' : ''}`;
+      card.querySelectorAll('.status-btn').forEach(b=>b.classList.remove('active-done','active-skipped'));
+      card.querySelector('[data-action="done"]').classList.toggle('active-done', newStatus==='done');
+      card.querySelector('[data-action="skipped"]').classList.toggle('active-skipped', newStatus==='skipped');
+      card.querySelector('[data-action="cancelled"]').classList.toggle('active-cancelled', newCancelled);
       if(action==='done' && newStatus==='done'){
         const wipe = card.querySelector('.wipe');
         wipe.classList.add('play');
@@ -1345,6 +1414,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned){
       updateOwedAfter();
       if(refreshStats) refreshStats();
       scheduleReflow(job.id, worker, date);
+      if(onAnyStatusChange) onAnyStatusChange(job.id);
     };
   });
 
@@ -1672,12 +1742,12 @@ async function renderDaySummary(){
     collected += payment;
     if(p.status==='done') doneN++;
     if(p.status==='skipped') skippedN++;
-    if(p.status==='cancelled') cancelledN++;
+    if(p.cancelled) cancelledN++;
     if(p.status==='todo') notDoneN++;
     const debt = -j.balance;
     const owedAfter = debt + chargeForStatus(price,p.status) - payment;
-    if(p.status !== 'cancelled') outstanding += owedAfter;
-    return {job:j,status:p.status,payment,price,note:p.note||'',owedAfter,frontApplied:!!p.frontApplied};
+    outstanding += owedAfter;
+    return {job:j,status:p.status,cancelled:!!p.cancelled,payment,price,note:p.note||'',owedAfter,frontApplied:!!p.frontApplied};
   });
 
   const card2 = document.createElement('div');
@@ -1692,7 +1762,7 @@ async function renderDaySummary(){
     tableRows += `
     <tr>
       <td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td>
-      <td><span class="badge badge-${r.status}">${r.status==='todo' ? 'To do' : statusLabel(r.status)}</span></td>
+      <td><span class="badge badge-${r.status}">${r.status==='todo' ? 'To do' : statusLabel(r.status)}</span>${cancelledBadge(r.cancelled)}</td>
       ${priceCell(r)}
       ${cashCell(r)}
       ${currentBalanceCell(r)}
@@ -1750,20 +1820,21 @@ function buildReportText(worker,date,rows,totals){
   lines.push(`Collected: ${money(totals.collected)}   Outstanding: ${money(totals.outstanding)}`);
   lines.push('');
   rows.forEach(r=>{
+    const cancelledNote = r.cancelled ? ' [Cancelled]' : '';
     if(r.status === 'todo'){
-      lines.push(`${r.job.customer} — ${statusLabel(r.status)}`);
+      lines.push(`${r.job.customer} — ${statusLabel(r.status)}${cancelledNote}`);
       return;
     }
     const charged = chargeForStatus(r.price, r.status);
-    lines.push(`${r.job.customer} — ${r.status}, charged ${money(charged)}${r.payment?`, paid ${money(r.payment)}`:''}${r.owedAfter>0.004?`, owes ${money(r.owedAfter)}`:''}${r.note?` — note: ${r.note}`:''}`);
+    lines.push(`${r.job.customer} — ${r.status}${cancelledNote}, charged ${money(charged)}${r.payment?`, paid ${money(r.payment)}`:''}${r.owedAfter>0.004?`, owes ${money(r.owedAfter)}`:''}${r.note?` — note: ${r.note}`:''}`);
   });
   return lines.join('\n');
 }
 
 function downloadReportCSV(worker,date,rows){
-  let csv = 'Customer,Address,Round,ListPrice,PriceCharged,Status,CashTaken,OwedAfter,Note\n';
+  let csv = 'Customer,Address,Round,ListPrice,PriceCharged,Status,Cancelled,CashTaken,OwedAfter,Note\n';
   rows.forEach(r=>{
-    csv += [r.job.customer,r.job.address,r.job.round,r.job.price.toFixed(2),r.price.toFixed(2),statusLabel(r.status),r.payment.toFixed(2),r.owedAfter.toFixed(2),r.note||'']
+    csv += [r.job.customer,r.job.address,r.job.round,r.job.price.toFixed(2),r.price.toFixed(2),statusLabel(r.status),r.cancelled?'Yes':'No',r.payment.toFixed(2),r.owedAfter.toFixed(2),r.note||'']
       .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',') + '\n';
   });
   const blob = new Blob([csv],{type:'text/csv'});
@@ -1774,9 +1845,9 @@ function downloadReportCSV(worker,date,rows){
 }
 
 function downloadReportCSVMulti(date,rows){
-  let csv = 'Worker,Customer,Address,Round,ListPrice,PriceCharged,Status,CashTaken,OwedAfter,Note\n';
+  let csv = 'Worker,Customer,Address,Round,ListPrice,PriceCharged,Status,Cancelled,CashTaken,OwedAfter,Note\n';
   rows.forEach(r=>{
-    csv += [r.worker,r.job.customer,r.job.address,r.job.round,r.job.price.toFixed(2),r.price.toFixed(2),statusLabel(r.status),r.payment.toFixed(2),r.owedAfter.toFixed(2),r.note||'']
+    csv += [r.worker,r.job.customer,r.job.address,r.job.round,r.job.price.toFixed(2),r.price.toFixed(2),statusLabel(r.status),r.cancelled?'Yes':'No',r.payment.toFixed(2),r.owedAfter.toFixed(2),r.note||'']
       .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',') + '\n';
   });
   const blob = new Blob([csv],{type:'text/csv'});
@@ -2136,12 +2207,12 @@ function renderAdminReport(main){
           collected += payment;
           if(p.status==='done') doneN++;
           if(p.status==='skipped') skippedN++;
-          if(p.status==='cancelled') cancelledN++;
+          if(p.cancelled) cancelledN++;
           if(p.status==='todo') notDoneN++;
           const debt = -j.balance;
           const owedAfter = debt + chargeForStatus(price,p.status) - payment;
-          if(p.status !== 'cancelled') outstanding += owedAfter;
-          allRows.push({worker:w,job:j,status:p.status,payment,price,note:p.note||'',owedAfter,frontApplied:!!p.frontApplied});
+          outstanding += owedAfter;
+          allRows.push({worker:w,job:j,status:p.status,cancelled:!!p.cancelled,payment,price,note:p.note||'',owedAfter,frontApplied:!!p.frontApplied});
         });
       });
       if(!totalJobs){ out.innerHTML = `<p class="muted">No job lists loaded for ${date} yet.</p>`; return; }
@@ -2159,7 +2230,7 @@ function renderAdminReport(main){
         <div class="section-title" style="margin-top:16px;">All jobs</div>
         <table class="report">
           <tr><th>Worker</th><th>Address</th><th>Status</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Balance</th></tr>
-          ${allRows.length ? allRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span></td>${chargedCell(r)}${paidCell(r)}${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="6" class="muted">No jobs yet.</td></tr>`}
+          ${allRows.length ? allRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span>${cancelledBadge(r.cancelled)}</td>${chargedCell(r)}${paidCell(r)}${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="6" class="muted">No jobs yet.</td></tr>`}
         </table>
         ${renderNewCustomerSection(allRows)}
         <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
@@ -2181,12 +2252,12 @@ function renderAdminReport(main){
       collected += payment;
       if(p.status==='done') doneN++;
       if(p.status==='skipped') skippedN++;
-      if(p.status==='cancelled') cancelledN++;
+      if(p.cancelled) cancelledN++;
       if(p.status==='todo') notDoneN++;
       const debt = -j.balance;
       const owedAfter = debt + chargeForStatus(price,p.status) - payment;
-      if(p.status !== 'cancelled') outstanding += owedAfter;
-      return {job:j,status:p.status,payment,price,note:p.note||'',owedAfter,frontApplied:!!p.frontApplied};
+      outstanding += owedAfter;
+      return {job:j,status:p.status,cancelled:!!p.cancelled,payment,price,note:p.note||'',owedAfter,frontApplied:!!p.frontApplied};
     });
     out.innerHTML = `
       <table class="report">
@@ -2200,7 +2271,7 @@ function renderAdminReport(main){
       <div class="section-title" style="margin-top:16px;">Jobs</div>
       <table class="report">
         <tr><th>Address</th><th>Status</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Balance</th></tr>
-        ${rows.length ? rows.map(r=>`<tr><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span></td>${chargedCell(r)}${paidCell(r)}${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="5" class="muted">No jobs yet.</td></tr>`}
+        ${rows.length ? rows.map(r=>`<tr><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span>${cancelledBadge(r.cancelled)}</td>${chargedCell(r)}${paidCell(r)}${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="5" class="muted">No jobs yet.</td></tr>`}
       </table>
       ${renderNewCustomerSection(rows)}
       <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
