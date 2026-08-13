@@ -1731,8 +1731,7 @@ async function renderDaySummary(){
   main.className = 'main';
   app.appendChild(main);
 
-  const lookup = await loadCoordLookup();
-  const sortedJobs = sortJobsByRoundOrder(jobs, lookup);
+  const sortedJobs = jobs.slice().sort((a,b)=>a.order-b.order);
 
   let collected=0, doneN=0, skippedN=0, cancelledN=0, notDoneN=0, outstanding=0;
   const rows = sortedJobs.map(j=>{
@@ -2119,8 +2118,7 @@ async function renderAdminDayManagement(main){
       return;
     }
     const prog = await loadProgress(worker,date);
-    const lookup = await loadCoordLookup();
-    const sorted = sortJobsByRoundOrder(jobs, lookup);
+    const sorted = jobs.slice().sort((a,b)=>a.order-b.order);
     out.innerHTML = '';
 
     const headerCard = document.createElement('div');
@@ -2248,8 +2246,7 @@ function renderAdminReport(main){
     const { jobs, prog: progRaw } = await loadForReport(worker,date);
     if(!jobs || !jobs.length){ out.innerHTML = `<p class="muted">No job list loaded for ${worker} on ${date}.</p>`; return; }
     const prog = progRaw || {};
-    const lookup = await loadCoordLookup();
-    const sortedJobs = sortJobsByRoundOrder(jobs, lookup);
+    const sortedJobs = jobs.slice().sort((a,b)=>a.order-b.order);
     let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0, notDoneN=0;
     const rows = sortedJobs.map(j=>{
       const p = prog[j.id] || {status:'todo',payment:0};
