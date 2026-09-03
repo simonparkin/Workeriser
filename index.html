@@ -478,6 +478,33 @@ async function reverseWorkOrder(worker,date){
   return true;
 }
 
+// moves one or several jobs up/down by one step each, past their nearest unselected
+// neighbour — works for a single job (arrows) or a multi-selected group alike
+async function nudgeJobOrder(worker,date,jobIds,direction){
+  const jobs = await loadJobs(worker,date);
+  if(!jobs || !jobs.length) return;
+  const arr = jobs.slice().sort((a,b)=>a.order-b.order);
+  const selSet = new Set(jobIds);
+  const sel = arr.map(j=>selSet.has(j.id));
+  if(direction === 'up'){
+    for(let i=0;i<arr.length;i++){
+      if(sel[i] && i>0 && !sel[i-1]){
+        [arr[i-1],arr[i]] = [arr[i],arr[i-1]];
+        [sel[i-1],sel[i]] = [sel[i],sel[i-1]];
+      }
+    }
+  } else {
+    for(let i=arr.length-1;i>=0;i--){
+      if(sel[i] && i<arr.length-1 && !sel[i+1]){
+        [arr[i],arr[i+1]] = [arr[i+1],arr[i]];
+        [sel[i],sel[i+1]] = [sel[i+1],sel[i]];
+      }
+    }
+  }
+  arr.forEach((j,idx)=>{ j.order = idx; });
+  await saveJobs(worker,date,arr);
+}
+
 // reads data for reporting: prefers an archived snapshot (taken at Clear time) over
 // live data, so a cleared day's report still reflects what actually happened that day
 async function loadForReport(worker,date){
@@ -2169,8 +2196,35 @@ async function renderAdminDayManagement(main){
     listWrap.style.marginTop = '14px';
     out.appendChild(listWrap);
 
+    const reorderBar = document.createElement('div');
+    listWrap.appendChild(reorderBar);
+    const selectedForReorder = new Set();
+    function updateReorderBar(){
+      reorderBar.innerHTML = '';
+      if(!selectedForReorder.size) return;
+      const box = document.createElement('div');
+      box.className = 'move-bar';
+      box.style.marginBottom = '14px';
+      box.innerHTML = `
+        <div class="move-bar-label">${selectedForReorder.size} selected for reordering</div>
+        <div class="move-bar-targets">
+          <button type="button" class="move-target-btn" id="reorderUpBtn">▲ Move up</button>
+          <button type="button" class="move-target-btn" id="reorderDownBtn">▼ Move down</button>
+        </div>
+      `;
+      reorderBar.appendChild(box);
+      box.querySelector('#reorderUpBtn').onclick = async ()=>{
+        await nudgeJobOrder(worker, date, Array.from(selectedForReorder), 'up');
+        loadAndRender();
+      };
+      box.querySelector('#reorderDownBtn').onclick = async ()=>{
+        await nudgeJobOrder(worker, date, Array.from(selectedForReorder), 'down');
+        loadAndRender();
+      };
+    }
+
     let lastRound = null;
-    sorted.forEach(job=>{
+    sorted.forEach((job,idx)=>{
       if(job.round && job.round !== lastRound){
         const rl = document.createElement('div');
         rl.className = 'round-label';
@@ -2178,8 +2232,36 @@ async function renderAdminDayManagement(main){
         listWrap.appendChild(rl);
         lastRound = job.round;
       }
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;align-items:stretch;margin-bottom:10px;';
+      const controls = document.createElement('div');
+      controls.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:4px;flex:none;justify-content:center;width:34px;';
+      controls.innerHTML = `
+        <button type="button" class="dm-up-btn" ${idx===0?'disabled':''} style="width:32px;height:28px;border:1.5px solid var(--line);background:#fff;border-radius:7px;color:var(--navy);font-size:13px;cursor:pointer;">▲</button>
+        <input type="checkbox" class="dm-reorder-check" style="width:18px;height:18px;accent-color:var(--navy);">
+        <button type="button" class="dm-down-btn" ${idx===sorted.length-1?'disabled':''} style="width:32px;height:28px;border:1.5px solid var(--line);background:#fff;border-radius:7px;color:var(--navy);font-size:13px;cursor:pointer;">▼</button>
+      `;
       // isSuper=true hides the Reject button, which is meant for field workers, not admin edits
-      listWrap.appendChild(renderJobCard(worker, date, job, prog, null, true, loadAndRender));
+      const cardEl = renderJobCard(worker, date, job, prog, null, true, loadAndRender);
+      cardEl.style.flex = '1';
+      cardEl.style.marginBottom = '0';
+      row.appendChild(controls);
+      row.appendChild(cardEl);
+      listWrap.appendChild(row);
+
+      controls.querySelector('.dm-up-btn').onclick = async ()=>{
+        await nudgeJobOrder(worker, date, [job.id], 'up');
+        loadAndRender();
+      };
+      controls.querySelector('.dm-down-btn').onclick = async ()=>{
+        await nudgeJobOrder(worker, date, [job.id], 'down');
+        loadAndRender();
+      };
+      controls.querySelector('.dm-reorder-check').addEventListener('change', (e)=>{
+        if(e.target.checked) selectedForReorder.add(job.id);
+        else selectedForReorder.delete(job.id);
+        updateReorderBar();
+      });
     });
   }
 
