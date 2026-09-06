@@ -2213,6 +2213,7 @@ async function renderAdminDayManagement(main, header){
         <div class="move-bar-targets">
           <button type="button" class="move-target-btn" id="reorderUpBtn">▲ Move up</button>
           <button type="button" class="move-target-btn" id="reorderDownBtn">▼ Move down</button>
+          <button type="button" class="move-dismiss-btn" id="reorderClearBtn" style="border:none;border-radius:20px;padding:8px 14px;font-weight:700;font-size:13px;cursor:pointer;">Deselect all</button>
         </div>
       `;
       dmReorderBar.appendChild(box);
@@ -2222,6 +2223,10 @@ async function renderAdminDayManagement(main, header){
       };
       box.querySelector('#reorderDownBtn').onclick = async ()=>{
         await nudgeJobOrder(worker, date, Array.from(selectedForReorder), 'down');
+        loadAndRender(true);
+      };
+      box.querySelector('#reorderClearBtn').onclick = ()=>{
+        selectedForReorder.clear();
         loadAndRender(true);
       };
     }
