@@ -1185,6 +1185,8 @@ async function renderWorker(){
   const todoJobs = sorted.filter(j=> !prog[j.id] || prog[j.id].status==='todo');
   const completedJobs = sorted.filter(j=> prog[j.id] && prog[j.id].status!=='todo');
 
+  const balanceLinkHandlers = new Map(); // job.id -> recompute function, wired up after all cards exist
+
   function renderGroup(list, onCard){
     let lastRound = null;
     list.forEach(job=>{
@@ -1195,22 +1197,65 @@ async function renderWorker(){
         main.appendChild(rl);
         lastRound = job.round;
       }
-      const card = renderJobCard(worker,date,job,prog,refreshStats,isSuper,null,checkDanglingCancelled);
+      const card = renderJobCard(worker,date,job,prog,refreshStats,isSuper,null,checkDanglingCancelled,()=>{
+        const fn = balanceLinkHandlers.get(job.id);
+        if(fn) fn();
+      });
       main.appendChild(card);
       if(onCard) onCard(job, card);
     });
   }
 
+  const allCardMap = new Map();
   const todoCardMap = new Map();
-  renderGroup(todoJobs, (job,card)=>{ todoCardMap.set(job.id, card); });
+  renderGroup(todoJobs, (job,card)=>{ allCardMap.set(job.id, card); todoCardMap.set(job.id, card); });
 
   if(completedJobs.length){
     const divider = document.createElement('div');
     divider.className = 'completed-divider';
     divider.innerHTML = `<span>Completed</span>`;
     main.appendChild(divider);
-    renderGroup(completedJobs);
+    renderGroup(completedJobs, (job,card)=>{ allCardMap.set(job.id, card); });
   }
+
+  // Some properties get split into two separate jobs on the same day (e.g. outside
+  // windows vs inside windows, only done if someone's in) — both share one real
+  // account balance, so their "today's balance" needs to reflect both jobs combined,
+  // live, on both cards, rather than each card presuming it's the only thing happening.
+  const addressGroups = new Map();
+  sorted.forEach(job=>{
+    if(!addressGroups.has(job.address)) addressGroups.set(job.address, []);
+    addressGroups.get(job.address).push(job);
+  });
+  addressGroups.forEach(groupJobs=>{
+    if(groupJobs.length < 2) return;
+    const groupCards = groupJobs.map(j=>allCardMap.get(j.id)).filter(Boolean);
+    if(groupCards.length < 2) return;
+    function recomputeLinkedBalance(){
+      const debt = -groupJobs[0].balance;
+      let chargeSum = 0, paymentSum = 0, allSkipped = true;
+      groupCards.forEach(c=>{
+        const isSkipped = c.querySelector('[data-action="skipped"]').classList.contains('active-skipped');
+        if(!isSkipped) allSkipped = false;
+        const price = parseFloat(c.querySelector('.price-input').value) || 0;
+        const payment = parseFloat(c.querySelector('.pay-input').value) || 0;
+        if(!isSkipped) chargeSum += price; // presumes each job happens unless explicitly skipped, same rule as a single card
+        paymentSum += payment;
+      });
+      const owedAfter = debt + chargeSum - paymentSum;
+      groupCards.forEach(c=>{
+        const labelEl = c.querySelector('.balance-label');
+        const valueEl = c.querySelector('.balance-value');
+        if(labelEl) labelEl.textContent = allSkipped ? 'Current balance' : "Today's balance";
+        valueEl.dataset.owed = String(owedAfter);
+        if(owedAfter > 0.004) valueEl.innerHTML = `<b style="color:var(--red)">${money(owedAfter)}</b>`;
+        else if(owedAfter < -0.004) valueEl.innerHTML = `<b style="color:var(--green)">${money(-owedAfter)} credit</b>`;
+        else valueEl.innerHTML = `<b style="color:var(--green)">£0.00</b>`;
+      });
+    }
+    groupJobs.forEach(j=> balanceLinkHandlers.set(j.id, recomputeLinkedBalance));
+    recomputeLinkedBalance();
+  });
 
   // footer summary / finish
   bar.className = 'summary-bar';
@@ -1328,7 +1373,7 @@ async function renderWorker(){
   armScreenGuard();
 }
 
-function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,onAnyStatusChange){
+function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,onAnyStatusChange,onBalanceChange){
   const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'', frontApplied:false, cancelled:false };
   const card = document.createElement('div');
   const vRound = isVRound(job.round);
@@ -1412,6 +1457,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     const el = card.querySelector('.balance-value');
     const labelEl = card.querySelector('.balance-label');
     if(labelEl) labelEl.textContent = notCleaned ? 'Current balance' : "Today's balance";
+    el.dataset.owed = String(owedAfter);
     if(owedAfter > 0.004) el.innerHTML = `<b style="color:var(--red)">${money(owedAfter)}</b>`;
     else if(owedAfter < -0.004) el.innerHTML = `<b style="color:var(--green)">${money(-owedAfter)} credit</b>`;
     else el.innerHTML = `<b style="color:var(--green)">£0.00</b>`;
@@ -1455,6 +1501,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
         wipe.classList.add('play');
       }
       updateOwedAfter();
+      if(onBalanceChange) onBalanceChange();
       if(refreshStats) refreshStats();
       scheduleReflow(job.id, worker, date);
       if(onAnyStatusChange) onAnyStatusChange(job.id);
@@ -1517,6 +1564,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
 
   priceInput.addEventListener('input', ()=>{
     updateOwedAfter();
+    if(onBalanceChange) onBalanceChange();
     frontApplied = false;
     updateFrontButton();
     persist(current=>{ current.price = priceInput.value; current.frontApplied = false; });
@@ -1526,6 +1574,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     if(priceInput.value !== ''){
       priceInput.value = currentPrice().toFixed(2);
       updateOwedAfter();
+      if(onBalanceChange) onBalanceChange();
       persist(current=>{ current.price = priceInput.value; });
       scheduleReflow(job.id, worker, date);
     }
@@ -1535,13 +1584,30 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     frontApplied = !frontApplied;
     priceInput.value = (frontApplied ? job.frontPrice : job.price).toFixed(2);
     updateOwedAfter();
+    if(onBalanceChange) onBalanceChange();
     updateFrontButton();
     persist(current=>{ current.price = priceInput.value; current.frontApplied = frontApplied; });
     scheduleReflow(job.id, worker, date);
   };
 
+  payInput.addEventListener('focus', ()=>{
+    if(payInput.value === ''){
+      const owedRaw = parseFloat(card.querySelector('.balance-value').dataset.owed || '0');
+      if(owedRaw > 0.004){
+        payInput.value = owedRaw.toFixed(2);
+        payInput.select();
+        updateOwedAfter();
+        if(onBalanceChange) onBalanceChange();
+        persist(current=>{ current.payment = payInput.value; });
+        if(refreshStats) refreshStats();
+        scheduleReflow(job.id, worker, date);
+      }
+    }
+  });
+
   payInput.addEventListener('input', ()=>{
     updateOwedAfter();
+    if(onBalanceChange) onBalanceChange();
     persist(current=>{ current.payment = payInput.value; });
     if(refreshStats) refreshStats();
     scheduleReflow(job.id, worker, date);
@@ -2233,6 +2299,9 @@ async function renderAdminDayManagement(main, header){
     updateReorderBar();
 
     let lastRound = null;
+    const dmBalanceLinkHandlers = new Map();
+    const dmCardMap = new Map();
+
     sorted.forEach((job,idx)=>{
       if(job.round && job.round !== lastRound){
         const rl = document.createElement('div');
@@ -2251,12 +2320,16 @@ async function renderAdminDayManagement(main, header){
         <button type="button" class="dm-down-btn" ${idx===sorted.length-1?'disabled':''} style="width:32px;height:28px;border:1.5px solid var(--line);background:#fff;border-radius:7px;color:var(--navy);font-size:13px;cursor:pointer;">▼</button>
       `;
       // isSuper=true hides the Reject button, which is meant for field workers, not admin edits
-      const cardEl = renderJobCard(worker, date, job, prog, null, true, loadAndRender);
+      const cardEl = renderJobCard(worker, date, job, prog, null, true, loadAndRender, null, ()=>{
+        const fn = dmBalanceLinkHandlers.get(job.id);
+        if(fn) fn();
+      });
       cardEl.style.flex = '1';
       cardEl.style.marginBottom = '0';
       row.appendChild(controls);
       row.appendChild(cardEl);
       listWrap.appendChild(row);
+      dmCardMap.set(job.id, cardEl);
 
       controls.querySelector('.dm-up-btn').onclick = async ()=>{
         await nudgeJobOrder(worker, date, [job.id], 'up');
@@ -2271,6 +2344,43 @@ async function renderAdminDayManagement(main, header){
         else selectedForReorder.delete(job.id);
         updateReorderBar();
       });
+    });
+
+    // same property split into two jobs (e.g. outside vs inside windows) share one
+    // real account balance — keep both cards' "today's balance" in sync, live
+    const dmAddressGroups = new Map();
+    sorted.forEach(job=>{
+      if(!dmAddressGroups.has(job.address)) dmAddressGroups.set(job.address, []);
+      dmAddressGroups.get(job.address).push(job);
+    });
+    dmAddressGroups.forEach(groupJobs=>{
+      if(groupJobs.length < 2) return;
+      const groupCards = groupJobs.map(j=>dmCardMap.get(j.id)).filter(Boolean);
+      if(groupCards.length < 2) return;
+      function recomputeLinkedBalance(){
+        const debt = -groupJobs[0].balance;
+        let chargeSum = 0, paymentSum = 0, allSkipped = true;
+        groupCards.forEach(c=>{
+          const isSkipped = c.querySelector('[data-action="skipped"]').classList.contains('active-skipped');
+          if(!isSkipped) allSkipped = false;
+          const price = parseFloat(c.querySelector('.price-input').value) || 0;
+          const payment = parseFloat(c.querySelector('.pay-input').value) || 0;
+          if(!isSkipped) chargeSum += price; // presumes each job happens unless explicitly skipped, same rule as a single card
+          paymentSum += payment;
+        });
+        const owedAfter = debt + chargeSum - paymentSum;
+        groupCards.forEach(c=>{
+          const labelEl = c.querySelector('.balance-label');
+          const valueEl = c.querySelector('.balance-value');
+          if(labelEl) labelEl.textContent = allSkipped ? 'Current balance' : "Today's balance";
+          valueEl.dataset.owed = String(owedAfter);
+          if(owedAfter > 0.004) valueEl.innerHTML = `<b style="color:var(--red)">${money(owedAfter)}</b>`;
+          else if(owedAfter < -0.004) valueEl.innerHTML = `<b style="color:var(--green)">${money(-owedAfter)} credit</b>`;
+          else valueEl.innerHTML = `<b style="color:var(--green)">£0.00</b>`;
+        });
+      }
+      groupJobs.forEach(j=> dmBalanceLinkHandlers.set(j.id, recomputeLinkedBalance));
+      recomputeLinkedBalance();
     });
   }
 
