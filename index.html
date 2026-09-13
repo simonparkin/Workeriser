@@ -183,13 +183,6 @@
     background:var(--slate-bg);border-radius:20px;padding:2px 8px 2px 7px;
   }
   .phone-btn:active{background:var(--line);}
-  .nav-btn{
-    display:inline-flex;align-items:center;gap:4px;flex:none;width:fit-content;
-    background:var(--navy);color:#fff;text-decoration:none;
-    font-size:11px;font-weight:700;padding:3px 8px 3px 7px;border-radius:20px;
-    white-space:nowrap;margin-top:7px;
-  }
-  .nav-btn:active{background:var(--navy-deep);}
   .job-info .notes{font-size:12.5px;color:var(--amber-deep);margin-top:6px;font-weight:600;}
 
   .price-block{display:flex;align-items:center;gap:10px;flex:none;}
@@ -214,24 +207,33 @@
     cursor:pointer;font-family:inherit;padding:2px;
   }
   .price-block .front.front-active{background:var(--amber-deep);color:#fff;}
-  .debt-knock-badge{
+  .nav-icon-btn{
     flex:none;width:46px;height:46px;
-    display:flex;flex-direction:column;align-items:center;justify-content:center;
-    background:var(--red);color:#fff;border:2px solid var(--red);border-radius:11px;
-    font-size:9px;font-weight:800;letter-spacing:.02em;line-height:1.2;text-align:center;
-    text-transform:uppercase;
+    display:flex;align-items:center;justify-content:center;
+    background:var(--navy);border-radius:11px;text-decoration:none;
   }
+  .nav-icon-btn:active{background:var(--navy-deep);}
 
   .job-controls{display:flex;gap:8px;margin-top:14px;}
   .status-btn{
     flex:1;padding:9px 4px;border-radius:9px;border:1.5px solid var(--line);
     background:#fff;font-size:12.5px;font-weight:700;cursor:pointer;color:var(--ink-soft);
     display:flex;flex-direction:column;align-items:center;gap:2px;
+    width:100%;font-family:inherit;
   }
   .status-btn .ic{font-size:15px;}
   .status-btn.active-done{background:var(--green);border-color:var(--green);color:#fff;}
   .status-btn.active-skipped{background:var(--amber);border-color:var(--amber);color:#3a2a00;}
   .status-btn.active-cancelled{background:var(--red);border-color:var(--red);color:#fff;}
+  .status-btn.debt-knock-overridden{border:2px solid var(--red);}
+  .done-wrap{position:relative;flex:1;}
+  .debt-knock-cap{
+    position:absolute;inset:0;border-radius:9px;
+    background:var(--red);color:#fff;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;
+    font-size:12px;font-weight:800;letter-spacing:.03em;text-transform:uppercase;
+    line-height:1.25;text-align:center;
+  }
   .reject-btn{
     width:100%;margin-top:8px;background:transparent;border:1.5px dashed var(--red);
     color:var(--red);border-radius:9px;padding:7px 4px;font-size:12px;font-weight:600;
@@ -1396,20 +1398,21 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
             ${escapeHtml(job.phone)}
           </a>` : ''}
         </div>
-        <a class="nav-btn" href="${navUrl(job)}" target="_blank" rel="noopener">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M3 11l17-8-8 17-2-7-7-2z" fill="currentColor"/></svg>
-          Navigate
-        </a>
         ${job.notes ? `<div class="notes">⚠ ${escapeHtml(job.notes)}</div>` : ''}
       </div>
       <div class="price-block">
-        <div class="debt-knock-badge" style="display:none;"><div>4TH</div><div>TIME</div></div>
+        <a class="nav-icon-btn" href="${navUrl(job)}" target="_blank" rel="noopener" title="Navigate">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M3 11l17-8-8 17-2-7-7-2z" fill="#fff"/></svg>
+        </a>
         <button type="button" class="front" title="Tap to charge the front price instead"><span style="font-size:16px;">FO</span></button>
         <div class="price-edit"><span class="pfx">£</span><input type="number" class="price-input" inputmode="decimal" min="0" step="0.01" value="${parseFloat(priceVal).toFixed(2)}"></div>
       </div>
     </div>
     <div class="job-controls">
-      <button class="status-btn ${p.status==='done'?'active-done':''}" data-action="done"><span class="ic">✓</span>Done</button>
+      <div class="done-wrap">
+        <button class="status-btn ${p.status==='done'?'active-done':''}" data-action="done"><span class="ic">✓</span>Done</button>
+        <div class="debt-knock-cap" style="display:none;">4TH<br>TIME</div>
+      </div>
       <button class="status-btn ${p.status==='skipped'?'active-skipped':''}" data-action="skipped"><span class="ic">↷</span>Skipped</button>
       <button class="status-btn ${p.cancelled?'active-cancelled':''}" data-action="cancelled"><span class="ic">✕</span>Cancelled</button>
     </div>
@@ -1446,6 +1449,10 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
   const payInput = card.querySelector('.pay-input');
   let currentStatus = p.status;
   let currentCancelled = !!p.cancelled;
+  let capDismissed = false;
+  let recapTimer = null;
+  const capEl = card.querySelector('.debt-knock-cap');
+  const doneBtn = card.querySelector('[data-action="done"]');
 
   function currentPrice(){ return parseFloat(priceInput.value) || 0; }
 
@@ -1464,9 +1471,24 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
 
     const priceRef = currentPrice();
     const showDebtKnock = owedAfter > 0.004 && priceRef > 0.004 && owedAfter >= 4 * priceRef;
-    card.querySelector('.debt-knock-badge').style.display = showDebtKnock ? 'flex' : 'none';
+    // the warning stops mattering once the job is actually marked Done — at that
+    // point the decision's been made and acted on, so nothing more to guard
+    const relevantNow = showDebtKnock && currentStatus !== 'done';
+    if(!relevantNow) capDismissed = false;
+    capEl.style.display = (relevantNow && !capDismissed) ? 'flex' : 'none';
+    doneBtn.classList.toggle('debt-knock-overridden', relevantNow && capDismissed);
   }
   updateOwedAfter();
+
+  capEl.addEventListener('click', ()=>{
+    capDismissed = true;
+    updateOwedAfter();
+    if(recapTimer) clearTimeout(recapTimer);
+    recapTimer = setTimeout(()=>{
+      capDismissed = false;
+      updateOwedAfter(); // cap reappears only if the job still isn't marked Done
+    }, 2*60*1000);
+  });
 
   async function persist(mutator){
     const current = prog[job.id] ? Object.assign({}, prog[job.id]) : {status:'todo',payment:'',price:'',note:'',frontApplied:false,cancelled:false};
@@ -2215,6 +2237,8 @@ async function renderAdminDayManagement(main, header){
       out.appendChild(listWrap);
 
       let lastRound = null;
+      const cardMap = new Map();
+      const balanceLinkHandlers = new Map();
       flat.forEach(({worker:w, job, prog})=>{
         if(job.round && job.round !== lastRound){
           const rl = document.createElement('div');
@@ -2223,7 +2247,50 @@ async function renderAdminDayManagement(main, header){
           listWrap.appendChild(rl);
           lastRound = job.round;
         }
-        listWrap.appendChild(renderJobCard(w, date, job, prog, null, true, loadAndRender));
+        const cardEl = renderJobCard(w, date, job, prog, null, true, loadAndRender, null, ()=>{
+          const fn = balanceLinkHandlers.get(job.id);
+          if(fn) fn();
+        });
+        listWrap.appendChild(cardEl);
+        cardMap.set(job.id, cardEl);
+      });
+
+      // same property split into two jobs (e.g. outside vs inside windows) share one
+      // real account balance — keep both cards' "today's balance" in sync, live,
+      // same as the worker's own screen and the single-worker Day Management view
+      const addressGroups = new Map();
+      flat.forEach(({job})=>{
+        if(!addressGroups.has(job.address)) addressGroups.set(job.address, []);
+        addressGroups.get(job.address).push(job);
+      });
+      addressGroups.forEach(groupJobs=>{
+        if(groupJobs.length < 2) return;
+        const groupCards = groupJobs.map(j=>cardMap.get(j.id)).filter(Boolean);
+        if(groupCards.length < 2) return;
+        function recomputeLinkedBalance(){
+          const debt = -groupJobs[0].balance;
+          let chargeSum = 0, paymentSum = 0, allSkipped = true;
+          groupCards.forEach(c=>{
+            const isSkipped = c.querySelector('[data-action="skipped"]').classList.contains('active-skipped');
+            if(!isSkipped) allSkipped = false;
+            const price = parseFloat(c.querySelector('.price-input').value) || 0;
+            const payment = parseFloat(c.querySelector('.pay-input').value) || 0;
+            if(!isSkipped) chargeSum += price;
+            paymentSum += payment;
+          });
+          const owedAfter = debt + chargeSum - paymentSum;
+          groupCards.forEach(c=>{
+            const labelEl = c.querySelector('.balance-label');
+            const valueEl = c.querySelector('.balance-value');
+            if(labelEl) labelEl.textContent = allSkipped ? 'Current balance' : "Today's balance";
+            valueEl.dataset.owed = String(owedAfter);
+            if(owedAfter > 0.004) valueEl.innerHTML = `<b style="color:var(--red)">${money(owedAfter)}</b>`;
+            else if(owedAfter < -0.004) valueEl.innerHTML = `<b style="color:var(--green)">${money(-owedAfter)} credit</b>`;
+            else valueEl.innerHTML = `<b style="color:var(--green)">£0.00</b>`;
+          });
+        }
+        groupJobs.forEach(j=> balanceLinkHandlers.set(j.id, recomputeLinkedBalance));
+        recomputeLinkedBalance();
       });
       return;
     }
