@@ -613,6 +613,7 @@ function rowsToJobs(rows){
       lat: isFinite(lat) ? lat : null,
       lon: isFinite(lon) ? lon : null,
       round: pick(r,['Round']) || '',
+      roundIndex: pick(r,['Round Index']) || null,
       price: price,
       frontPrice: frontPrice,
       balance: balance,
@@ -641,7 +642,7 @@ function isVRound(round){
 }
 
 /* ---- coordinate reference lookup (address -> lat/lon), updated occasionally ---- */
-async function loadCoordLookup(){ return (await fsGet('coord_lookup')) || { updatedAt:null, addresses:{}, roundOrder:[], addressOrder:{}, roundPosition:{} }; }
+async function loadCoordLookup(){ return (await fsGet('coord_lookup')) || { updatedAt:null, addresses:{}, roundOrder:[], roundPosition:{}, roundIndexOrder:{} }; }
 async function saveCoordLookup(lookup){ await fsSet('coord_lookup', lookup); }
 
 function normAddr(a){
@@ -676,10 +677,9 @@ function buildRoundOrder(rows){
   return order;
 }
 
-// each round's first row position in the reference file, on the exact same numeric
-// scale as buildAddressOrder's positions — this lets an unmatched-address job fall
-// back to "roughly where this round sits" rather than a scaled-up number that would
-// always sort after every exactly-matched address regardless of round
+// each round's first row position in the reference file — used as a fallback for
+// jobs that never had a Round Index at all (e.g. a New Customer added directly in
+// the app, rather than coming from an Aworka export)
 function buildRoundPosition(rows){
   const pos = {};
   rows.forEach((r,idx)=>{
@@ -689,31 +689,25 @@ function buildRoundPosition(rows){
   return pos;
 }
 
-// the reference CSV is exported in true visiting order (round, then position within round) —
-// capturing each address's row position lets us match Aworka's actual sequence exactly,
-// not just which round comes before which
-function buildAddressOrder(rows){
+// Round + Round Index together uniquely identify a job in Aworka's own data —
+// no text matching needed at all, so this is the most reliable identifier
+// available and works even for customers whose name and address are both hidden
+function buildRoundIndexOrder(rows){
   const order = {};
   rows.forEach((r,idx)=>{
-    const addr = pick(r,['Job Address','Customer Address','Address']);
-    const n = normAddr(addr);
-    if(n && !(n in order)) order[n] = idx;
+    const round = pick(r,['Round']);
+    const roundIndex = pick(r,['Round Index']);
+    if(!round || !roundIndex) return;
+    const key = round + '||' + roundIndex;
+    if(!(key in order)) order[key] = idx;
   });
   return order;
 }
 
-function findAddressRank(address, addressOrder){
-  const n = normAddr(address);
-  if(!n) return null;
-  if(addressOrder[n] !== undefined) return addressOrder[n];
-  let best = null, bestLen = 0;
-  for(const key in addressOrder){
-    if((key.includes(n) || n.includes(key)) && key.length > bestLen){
-      best = addressOrder[key];
-      bestLen = key.length;
-    }
-  }
-  return best;
+function findRoundIndexRank(round, roundIndex, roundIndexOrder){
+  if(!round || !roundIndex) return null;
+  const key = round + '||' + roundIndex;
+  return (key in roundIndexOrder) ? roundIndexOrder[key] : null;
 }
 
 function findCoordsForAddress(address, lookup){
@@ -917,12 +911,12 @@ function chargeForStatus(price, status){
 // combines exact address position (Aworka's true visiting order, from the reference file)
 // with a round-grouped fallback for anything that isn't matched (e.g. brand new customers)
 function roundOrderRank(job, lookup){
-  const addrRank = findAddressRank(job.address, lookup.addressOrder || {});
-  if(addrRank !== null) return addrRank;
+  const riRank = findRoundIndexRank(job.round, job.roundIndex, lookup.roundIndexOrder || {});
+  if(riRank !== null) return riRank;
+  // falls back to round position only for jobs that never had a Round Index at all —
+  // e.g. a New Customer added directly in the app, never having come from Aworka
   const roundPosition = lookup.roundPosition || {};
   if(job.round in roundPosition){
-    // same numeric scale as address positions, with a tiny nudge to keep same-round
-    // fallback jobs in their original relative order rather than all tying exactly
     return roundPosition[job.round] + (job.order || 0) * 0.0001;
   }
   return Infinity; // round genuinely not recognised at all — nothing sensible to fall back to
@@ -2168,11 +2162,11 @@ async function renderAdminUpload(main){
         const rows = parseCSV(e.target.result);
         const addresses = buildCoordAddresses(rows);
         const roundOrder = buildRoundOrder(rows);
-        const addressOrder = buildAddressOrder(rows);
         const roundPosition = buildRoundPosition(rows);
+        const roundIndexOrder = buildRoundIndexOrder(rows);
         const count = Object.keys(addresses).length;
         if(!count){ toast('No coordinates found in that file'); return; }
-        await saveCoordLookup({ updatedAt: new Date().toLocaleDateString('en-GB'), addresses, roundOrder, addressOrder, roundPosition });
+        await saveCoordLookup({ updatedAt: new Date().toLocaleDateString('en-GB'), addresses, roundOrder, roundPosition, roundIndexOrder });
         const { fixed, stillMissing } = await rescanAllRoundsForCoords();
         coordCard.querySelector('#cStatus').innerHTML = `<div class="note-box" style="margin-top:8px;">Saved ${count} addresses.${fixed ? ` Filled in coordinates for ${fixed} already-loaded job${fixed===1?'':'s'}.` : ''}${stillMissing ? ` ${stillMissing} job${stillMissing===1?'':'s'} still missing — check the address spelling matches.` : ''}</div>`;
         toast('Coordinate reference updated');
