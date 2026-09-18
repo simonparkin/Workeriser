@@ -1444,6 +1444,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
   let currentStatus = p.status;
   let currentCancelled = !!p.cancelled;
   let capDismissed = false;
+  let wasOverridden = !!p.debtKnockOverridden;
   let recapTimer = null;
   const capEl = card.querySelector('.debt-knock-cap');
   const doneBtn = card.querySelector('[data-action="done"]');
@@ -1459,23 +1460,39 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     const labelEl = card.querySelector('.balance-label');
     if(labelEl) labelEl.textContent = notCleaned ? 'Current balance' : "Today's balance";
     el.dataset.owed = String(owedAfter);
-    if(owedAfter > 0.004) el.innerHTML = `<b style="color:var(--red)">${money(owedAfter)}</b>`;
-    else if(owedAfter < -0.004) el.innerHTML = `<b style="color:var(--green)">${money(-owedAfter)} credit</b>`;
-    else el.innerHTML = `<b style="color:var(--green)">£0.00</b>`;
+    let balanceHtml;
+    if(owedAfter > 0.004) balanceHtml = `<b style="color:var(--red)">${money(owedAfter)}</b>`;
+    else if(owedAfter < -0.004) balanceHtml = `<b style="color:var(--green)">${money(-owedAfter)} credit</b>`;
+    else balanceHtml = `<b style="color:var(--green)">£0.00</b>`;
+    // skipped means today's price is correctly left out of the balance above — but
+    // the worker may still need to quote the standard rate if the customer asks
+    if(notCleaned){
+      balanceHtml += ` <span style="text-decoration:line-through;opacity:.5;font-weight:600;font-size:12px;" title="Standard price — not charged since this visit was skipped">${money(currentPrice())}</span>`;
+    }
+    el.innerHTML = balanceHtml;
+
+    // when skipped, nothing is being charged today — grey out and strike through
+    // the price to show that clearly, without touching the actual value, so the
+    // standard rate is still there to read off to the customer if they ask, and
+    // nothing is lost if the job later gets switched back to Done
 
     const priceRef = currentPrice();
     const showDebtKnock = owedAfter > 0.004 && priceRef > 0.004 && owedAfter >= 4 * priceRef;
-    // the warning stops mattering once the job is actually marked Done — at that
-    // point the decision's been made and acted on, so nothing more to guard
+    // the cap stops showing once the job is actually marked Done — at that point
+    // the decision's been made and acted on, so nothing more to guard against
     const relevantNow = showDebtKnock && currentStatus !== 'done';
-    if(!relevantNow) capDismissed = false;
+    if(!showDebtKnock) capDismissed = false; // only reset when the debt itself is no longer 4x+ — not just because Done is currently toggled on
     capEl.style.display = (relevantNow && !capDismissed) ? 'flex' : 'none';
-    doneBtn.classList.toggle('debt-knock-overridden', relevantNow && capDismissed);
+    // the red border is a lasting record that this job WAS overridden — unlike the
+    // cap itself, it doesn't go away once marked Done or moved to Completed
+    doneBtn.classList.toggle('debt-knock-overridden', wasOverridden);
   }
   updateOwedAfter();
 
   capEl.addEventListener('click', ()=>{
     capDismissed = true;
+    wasOverridden = true;
+    persist(current=>{ current.debtKnockOverridden = true; });
     updateOwedAfter();
     if(recapTimer) clearTimeout(recapTimer);
     recapTimer = setTimeout(()=>{
@@ -1581,9 +1598,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
   priceInput.addEventListener('input', ()=>{
     updateOwedAfter();
     if(onBalanceChange) onBalanceChange();
-    frontApplied = false;
-    updateFrontButton();
-    persist(current=>{ current.price = priceInput.value; current.frontApplied = false; });
+    persist(current=>{ current.price = priceInput.value; });
     scheduleReflow(job.id, worker, date);
   });
   priceInput.addEventListener('blur', ()=>{
