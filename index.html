@@ -153,13 +153,21 @@
   }
   .job-card.selectable{padding-left:44px;}
   .job-select-checkbox{
-    position:absolute;top:16px;left:14px;width:20px;height:20px;z-index:5;accent-color:var(--navy);
+    position:absolute;top:12px;left:13px;width:20px;height:20px;z-index:5;accent-color:var(--navy);
   }
-  .job-split-wrap{
-    position:absolute;top:44px;left:12px;z-index:5;display:flex;flex-direction:column;align-items:center;gap:1px;
+  .job-select-label{
+    position:absolute;top:32px;left:11px;z-index:5;font-size:7.5px;font-weight:800;
+    color:var(--ink-soft);letter-spacing:.02em;width:24px;text-align:center;
   }
-  .job-split-wrap input{width:18px;height:18px;accent-color:var(--amber-deep);}
-  .job-split-wrap span{font-size:7.5px;font-weight:800;color:var(--ink-soft);letter-spacing:.02em;}
+  .job-front-wrap, .job-back-wrap{
+    position:absolute;left:12px;z-index:5;display:flex;flex-direction:column;align-items:center;gap:1px;
+  }
+  .job-front-wrap{top:46px;}
+  .job-back-wrap{top:76px;}
+  .job-front-wrap input, .job-back-wrap input{width:18px;height:18px;}
+  .job-front-wrap input{accent-color:var(--amber-deep);}
+  .job-back-wrap input{accent-color:var(--blue);}
+  .job-front-wrap span, .job-back-wrap span{font-size:7.5px;font-weight:800;color:var(--ink-soft);letter-spacing:.02em;}
 
   .move-bar{
     background:var(--navy-deep);border-radius:var(--radius);
@@ -656,6 +664,51 @@ async function splitAndSendJobs(fromWorker, date, jobIds, targetWorker){
   ]);
 }
 
+// the mirror of splitAndSendJobs — used when the sender wants to do the FRONT
+// themselves and send the BACK to someone else instead, without needing to pass
+// the whole job away and back again. The main job stays exactly where it is; a
+// new "back" sub-card is created and sent straight to the chosen worker.
+async function splitAndKeepFront(fromWorker, date, jobIds, targetWorker){
+  const [fromJobs, targetJobsRaw, lookup] = await Promise.all([
+    loadJobs(fromWorker,date),
+    loadJobs(targetWorker,date),
+    loadCoordLookup()
+  ]);
+  const idSet = new Set(jobIds);
+  const source = fromJobs || [];
+  const targetJobs = targetJobsRaw || [];
+  const newSubJobs = [];
+
+  const updatedSource = source.map(mainJob=>{
+    if(!idSet.has(mainJob.id)) return mainJob;
+    const subJob = Object.assign({}, mainJob, {
+      id: 'sub_' + mainJob.id + '_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
+      isSubJob: true,
+      mainJobWorker: fromWorker,
+      mainJobId: mainJob.id,
+      lastAssignedBy: fromWorker
+    });
+    delete subJob.subJobWorker;
+    delete subJob.subJobId;
+    newSubJobs.push(subJob);
+    return Object.assign({}, mainJob, { subJobWorker: targetWorker, subJobId: subJob.id });
+  });
+
+  targetJobs.push(...newSubJobs);
+  const roundOrder = lookup.roundOrder || [];
+  function roundRank(roundName){
+    const idx = roundOrder.indexOf(roundName);
+    return idx === -1 ? Infinity : idx;
+  }
+  targetJobs.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
+  targetJobs.forEach((j,idx)=>{ j.order = idx; });
+
+  await Promise.all([
+    saveJobs(fromWorker, date, updatedSource),
+    saveJobs(targetWorker, date, targetJobs)
+  ]);
+}
+
 // if the main job turns out to be Skipped or Cancelled, the "back" sub-card is no
 // longer relevant for today — send it back the same way Reject does, rather than
 // leaving the second worker with a stray card for a job that isn't happening
@@ -668,6 +721,26 @@ async function rejectSubJobForMainStatus(mainWorker, mainJob, date){
   const mainJobs = await loadJobs(mainWorker, date);
   const updatedMain = mainJobs.map(j=> j.id===mainJob.id ? (({subJobWorker,subJobId,...rest})=>rest)(j) : j);
   await saveJobs(mainWorker, date, updatedMain);
+}
+
+// pressed from the sub-card's own Reject button, by whoever currently holds it —
+// e.g. "oh, you can do the back as well" — deletes the sub-card outright and
+// reverts the main job back to a plain, unsplit job card. Works no matter who
+// currently has the sub-card, unlike a normal Reject which sends a job back to
+// its sender; here there's nowhere sensible to send it back TO, since it only
+// exists because of the split in the first place.
+async function rejectSubJobEntirely(subWorker, subJob, date){
+  const [subJobs, subProg] = await Promise.all([loadJobs(subWorker, date), loadProgress(subWorker, date)]);
+  const remainingSub = (subJobs||[]).filter(j=>j.id!==subJob.id);
+  const remainingSubProg = Object.assign({}, subProg);
+  delete remainingSubProg[subJob.id];
+  const mainJobs = await loadJobs(subJob.mainJobWorker, date);
+  const updatedMain = (mainJobs||[]).map(j=> j.id===subJob.mainJobId ? (({subJobWorker,subJobId,...rest})=>rest)(j) : j);
+  await Promise.all([
+    saveJobs(subWorker, date, remainingSub),
+    saveProgress(subWorker, date, remainingSubProg),
+    saveJobs(subJob.mainJobWorker, date, updatedMain)
+  ]);
 }
 
 /* ================= CSV PARSING ================= */
@@ -1451,18 +1524,20 @@ async function renderWorker(){
   if(selectBtn){
     let selectMode = false;
     const selectedIds = new Set();
-    const splitIds = new Set();
+    const frontIds = new Set(); // "F" — send the front, keep a back card behind
+    const backIds = new Set();  // "B" — keep the front, send a back card away
 
     function renderMoveBar(){
       const existing = moveBarContainer.querySelector('.move-bar.select-bar');
       if(existing) existing.remove();
-      const allIds = new Set([...selectedIds, ...splitIds]);
+      const allIds = new Set([...selectedIds, ...frontIds, ...backIds]);
       if(!selectMode || allIds.size===0) return;
       const others = WORKERS.filter(w=>w!==worker);
       const mb = document.createElement('div');
       mb.className = 'move-bar select-bar';
+      const splitCount = frontIds.size + backIds.size;
       mb.innerHTML = `
-        <div class="move-bar-label">${allIds.size} selected${splitIds.size ? ` (${splitIds.size} split)` : ''} — send to</div>
+        <div class="move-bar-label">${allIds.size} selected${splitCount ? ` (${splitCount} split)` : ''} — send to</div>
         <div class="move-bar-targets">
           ${others.map(w=>`<button type="button" class="move-target-btn" data-target="${escapeHtml(w)}">${escapeHtml(w)}</button>`).join('')}
         </div>
@@ -1472,12 +1547,15 @@ async function renderWorker(){
         btn.onclick = async ()=>{
           const target = btn.dataset.target;
           const ids = Array.from(allIds);
-          const splitIdsArr = ids.filter(id=>splitIds.has(id));
-          const normalIds = ids.filter(id=>!splitIds.has(id));
+          const frontIdsArr = ids.filter(id=>frontIds.has(id));
+          const backIdsArr = ids.filter(id=>backIds.has(id));
+          const normalIds = ids.filter(id=>!frontIds.has(id) && !backIds.has(id));
           btn.disabled = true;
           if(normalIds.length) await moveJobsToWorker(worker, target, date, normalIds);
-          if(splitIdsArr.length) await splitAndSendJobs(worker, date, splitIdsArr, target);
-          toast(`Sent ${ids.length} job${ids.length===1?'':'s'} to ${target}${splitIdsArr.length ? ` (${splitIdsArr.length} split — "back" card${splitIdsArr.length===1?'':'s'} left with you)` : ''}`);
+          if(frontIdsArr.length) await splitAndSendJobs(worker, date, frontIdsArr, target);
+          if(backIdsArr.length) await splitAndKeepFront(worker, date, backIdsArr, target);
+          const splitTotal = frontIdsArr.length + backIdsArr.length;
+          toast(`Sent ${ids.length} job${ids.length===1?'':'s'} to ${target}${splitTotal ? ` (${splitTotal} split)` : ''}`);
           // undo only covers the plain moves — a split is more than a simple move to reverse cleanly
           state.lastMove = { from:worker, to:target, date, ids: normalIds };
           render();
@@ -1489,31 +1567,73 @@ async function renderWorker(){
       selectMode = on;
       selectBtn.textContent = selectMode ? 'Cancel' : 'Select';
       selectedIds.clear();
-      splitIds.clear();
+      frontIds.clear();
+      backIds.clear();
       todoCardMap.forEach((card,jobId)=>{
         let cb = card.querySelector('.job-select-checkbox');
-        let splitWrap = card.querySelector('.job-split-wrap');
+        let allLabel = card.querySelector('.job-select-label');
+        let frontWrap = card.querySelector('.job-front-wrap');
+        let backWrap = card.querySelector('.job-back-wrap');
         if(selectMode){
           card.classList.add('selectable');
           if(!cb){
             cb = document.createElement('input');
             cb.type = 'checkbox';
             cb.className = 'job-select-checkbox';
+            cb.title = 'ALL: send this job as a whole';
             cb.addEventListener('change', ()=>{
-              if(cb.checked) selectedIds.add(jobId);
-              else selectedIds.delete(jobId);
+              if(cb.checked){
+                selectedIds.add(jobId);
+                frontIds.delete(jobId);
+                backIds.delete(jobId);
+                const fc = card.querySelector('.job-front-checkbox');
+                const bc = card.querySelector('.job-back-checkbox');
+                if(fc) fc.checked = false;
+                if(bc) bc.checked = false;
+              } else {
+                selectedIds.delete(jobId);
+              }
               renderMoveBar();
             });
             card.appendChild(cb);
           }
-          if(!splitWrap){
-            splitWrap = document.createElement('div');
-            splitWrap.className = 'job-split-wrap';
-            splitWrap.innerHTML = `<input type="checkbox" class="job-split-checkbox" title="Split: send the front, keep a back card for a second worker"><span>SPLIT</span>`;
-            card.appendChild(splitWrap);
-            splitWrap.querySelector('.job-split-checkbox').addEventListener('change', (e)=>{
-              if(e.target.checked) splitIds.add(jobId);
-              else splitIds.delete(jobId);
+          if(!allLabel){
+            allLabel = document.createElement('div');
+            allLabel.className = 'job-select-label';
+            allLabel.textContent = 'ALL';
+            card.appendChild(allLabel);
+          }
+          if(!frontWrap){
+            frontWrap = document.createElement('div');
+            frontWrap.className = 'job-front-wrap';
+            frontWrap.innerHTML = `<input type="checkbox" class="job-front-checkbox" title="F: send the front, keep a back card for a second worker"><span>F</span>`;
+            card.appendChild(frontWrap);
+            frontWrap.querySelector('.job-front-checkbox').addEventListener('change', (e)=>{
+              if(e.target.checked){
+                frontIds.add(jobId);
+                backIds.delete(jobId); // F and B are opposite choices for the same job
+                const bc = card.querySelector('.job-back-checkbox');
+                if(bc) bc.checked = false;
+              } else {
+                frontIds.delete(jobId);
+              }
+              renderMoveBar();
+            });
+          }
+          if(!backWrap){
+            backWrap = document.createElement('div');
+            backWrap.className = 'job-back-wrap';
+            backWrap.innerHTML = `<input type="checkbox" class="job-back-checkbox" title="B: keep the front yourself, send a back card away"><span>B</span>`;
+            card.appendChild(backWrap);
+            backWrap.querySelector('.job-back-checkbox').addEventListener('change', (e)=>{
+              if(e.target.checked){
+                backIds.add(jobId);
+                frontIds.delete(jobId); // F and B are opposite choices for the same job
+                const fc = card.querySelector('.job-front-checkbox');
+                if(fc) fc.checked = false;
+              } else {
+                backIds.delete(jobId);
+              }
               renderMoveBar();
             });
           }
@@ -1523,7 +1643,9 @@ async function renderWorker(){
         } else {
           card.classList.remove('selectable');
           if(cb) cb.remove();
-          if(splitWrap) splitWrap.remove();
+          if(allLabel) allLabel.remove();
+          if(frontWrap) frontWrap.remove();
+          if(backWrap) backWrap.remove();
         }
       });
       renderMoveBar();
@@ -1910,6 +2032,7 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats){
       <label>Job note</label>
       <textarea rows="2">${escapeHtml(p.note || '')}</textarea>
     </div>
+    <button type="button" class="reject-btn">Reject (cancel this split)</button>
   `;
 
   let currentStatus = p.status;
@@ -1964,6 +2087,16 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats){
     persist(current=>{ current.note = e.target.value; });
     scheduleReflow(job.id, worker, date);
   });
+
+  card.querySelector('.reject-btn').onclick = async ()=>{
+    const btn = card.querySelector('.reject-btn');
+    if(!confirm(`Reject this split? This removes the "back" card completely — ${escapeHtml(job.address)} will just be a normal job for whoever has the front.`)) return;
+    btn.disabled = true;
+    btn.textContent = 'Removing…';
+    await rejectSubJobEntirely(worker, job, date);
+    toast('Split cancelled — back card removed');
+    render();
+  };
 
   return card;
 }
