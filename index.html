@@ -155,6 +155,11 @@
   .job-select-checkbox{
     position:absolute;top:16px;left:14px;width:20px;height:20px;z-index:5;accent-color:var(--navy);
   }
+  .job-split-wrap{
+    position:absolute;top:44px;left:12px;z-index:5;display:flex;flex-direction:column;align-items:center;gap:1px;
+  }
+  .job-split-wrap input{width:18px;height:18px;accent-color:var(--amber-deep);}
+  .job-split-wrap span{font-size:7.5px;font-weight:800;color:var(--ink-soft);letter-spacing:.02em;}
 
   .move-bar{
     background:var(--navy-deep);border-radius:var(--radius);
@@ -569,6 +574,100 @@ async function moveJobsToWorker(fromWorker, toWorker, date, jobIds){
     saveProgress(fromWorker, date, fromProg),
     saveProgress(toWorker, date, toProg)
   ]);
+
+  // if any of the moved jobs are "back" sub-cards, update the main job's pointer to
+  // follow them to their new worker, so the link never goes stale as it's passed along
+  const movedSubJobs = moving.filter(j=>j.isSubJob && j.mainJobWorker && j.mainJobId);
+  if(movedSubJobs.length){
+    const byMainWorker = {};
+    movedSubJobs.forEach(j=>{
+      (byMainWorker[j.mainJobWorker] = byMainWorker[j.mainJobWorker] || []).push(j.mainJobId);
+    });
+    await Promise.all(Object.entries(byMainWorker).map(async ([mainWorker, mainJobIds])=>{
+      const idSet2 = new Set(mainJobIds);
+      const mainJobs = await loadJobs(mainWorker, date);
+      if(!mainJobs) return;
+      const updated = mainJobs.map(mj=> idSet2.has(mj.id) ? Object.assign({}, mj, { subJobWorker: toWorker }) : mj);
+      await saveJobs(mainWorker, date, updated);
+    }));
+  }
+}
+
+// used from Select mode: sends the "front"/main job(s) to targetWorker as normal,
+// while a "back" sub-card for each is created and left behind in the sender's own
+// list — ready to be selected and sent on to whoever does the back, or just kept
+// by the sender if they're doing that part themselves
+async function splitAndSendJobs(fromWorker, date, jobIds, targetWorker){
+  const [fromJobs, fromProg, targetJobsRaw, targetProgRaw, lookup] = await Promise.all([
+    loadJobs(fromWorker,date),
+    loadProgress(fromWorker,date),
+    loadJobs(targetWorker,date),
+    loadProgress(targetWorker,date),
+    loadCoordLookup()
+  ]);
+  const idSet = new Set(jobIds);
+  const source = fromJobs || [];
+  const splitting = source.filter(j=>idSet.has(j.id));
+  const remaining = source.filter(j=>!idSet.has(j.id));
+  const targetJobs = targetJobsRaw || [];
+  const targetProg = targetProgRaw || {};
+  const newSubJobs = [];
+
+  splitting.forEach(mainJob=>{
+    const subJob = Object.assign({}, mainJob, {
+      id: 'sub_' + mainJob.id + '_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
+      isSubJob: true,
+      mainJobWorker: targetWorker,
+      mainJobId: mainJob.id,
+      lastAssignedBy: fromWorker
+    });
+    delete subJob.subJobWorker;
+    delete subJob.subJobId;
+    newSubJobs.push(subJob);
+
+    const updatedMain = Object.assign({}, mainJob, {
+      subJobWorker: fromWorker,
+      subJobId: subJob.id,
+      lastAssignedBy: fromWorker
+    });
+    targetJobs.push(updatedMain);
+    if(fromProg[mainJob.id]){
+      targetProg[mainJob.id] = fromProg[mainJob.id];
+      delete fromProg[mainJob.id];
+    }
+  });
+
+  const senderList = remaining.concat(newSubJobs);
+  const roundOrder = lookup.roundOrder || [];
+  function roundRank(roundName){
+    const idx = roundOrder.indexOf(roundName);
+    return idx === -1 ? Infinity : idx;
+  }
+  senderList.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
+  senderList.forEach((j,idx)=>{ j.order = idx; });
+  targetJobs.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
+  targetJobs.forEach((j,idx)=>{ j.order = idx; });
+
+  await Promise.all([
+    saveJobs(fromWorker, date, senderList),
+    saveJobs(targetWorker, date, targetJobs),
+    saveProgress(fromWorker, date, fromProg),
+    saveProgress(targetWorker, date, targetProg)
+  ]);
+}
+
+// if the main job turns out to be Skipped or Cancelled, the "back" sub-card is no
+// longer relevant for today — send it back the same way Reject does, rather than
+// leaving the second worker with a stray card for a job that isn't happening
+async function rejectSubJobForMainStatus(mainWorker, mainJob, date){
+  if(!mainJob.subJobWorker || !mainJob.subJobId) return;
+  const subWorker = mainJob.subJobWorker, subJobId = mainJob.subJobId;
+  const superUsers = await loadSuperUsers();
+  const target = mainJob.lastAssignedBy || superUsers[0] || 'Simon';
+  await moveJobsToWorker(subWorker, target, date, [subJobId]);
+  const mainJobs = await loadJobs(mainWorker, date);
+  const updatedMain = mainJobs.map(j=> j.id===mainJob.id ? (({subJobWorker,subJobId,...rest})=>rest)(j) : j);
+  await saveJobs(mainWorker, date, updatedMain);
 }
 
 /* ================= CSV PARSING ================= */
@@ -845,6 +944,26 @@ function jobIdsKey(jobs){ return (jobs||[]).map(j=>j.id).sort().join(','); }
 function startWorkerPoll(worker, date, currentJobs){
   if(workerPollTimer) clearInterval(workerPollTimer);
   const knownKey = jobIdsKey(currentJobs);
+  const splitJobs = (currentJobs||[]).filter(j=>j.isSubJob || j.subJobWorker);
+
+  async function computeLinkedSignature(){
+    if(!splitJobs.length) return '';
+    const parts = await Promise.all(splitJobs.map(async j=>{
+      if(j.isSubJob && j.mainJobWorker && j.mainJobId){
+        const mProg = await loadProgress(j.mainJobWorker, date);
+        const mp = (mProg||{})[j.mainJobId] || {};
+        return j.id + ':' + (mp.price||'') + ':' + (mp.status||'') + ':' + (mp.payment||'');
+      } else if(j.subJobWorker && j.subJobId){
+        const sProg = await loadProgress(j.subJobWorker, date);
+        const sp = (sProg||{})[j.subJobId] || {};
+        return j.id + ':' + (sp.payment||'');
+      }
+      return '';
+    }));
+    return parts.join('|');
+  }
+
+  let knownLinkedSignature = null;
   workerPollTimer = setInterval(async ()=>{
     if(state.screen!=='worker' || state.worker!==worker || state.date!==date){
       clearInterval(workerPollTimer);
@@ -853,6 +972,15 @@ function startWorkerPoll(worker, date, currentJobs){
     const freshJobs = await loadJobs(worker,date);
     if(jobIdsKey(freshJobs) !== knownKey){
       render();
+      return;
+    }
+    if(splitJobs.length){
+      if(knownLinkedSignature === null) knownLinkedSignature = await computeLinkedSignature();
+      const freshSignature = await computeLinkedSignature();
+      if(freshSignature !== knownLinkedSignature){
+        knownLinkedSignature = freshSignature;
+        render();
+      }
     }
   }, 15000);
 }
@@ -917,6 +1045,20 @@ function resolvedPrice(job, p){
 // skipped/cancelled jobs weren't actually cleaned, so no charge applies for the day
 function chargeForStatus(price, status){
   return status==='skipped' ? 0 : price;
+}
+
+// a split job (worked on by two people at once) counts as half a job for EACH
+// worker's tallies, not a whole one each — otherwise reports would double-count
+// the same piece of work. A job that isn't split counts as a normal whole job.
+function jobWeight(job){
+  return (job.isSubJob || job.subJobWorker) ? 0.5 : 1;
+}
+
+// formats a possibly-fractional job count for display — "3" stays "3", a half-job
+// total like 3.5 keeps its one decimal place rather than showing 3.500000001 etc.
+function formatJobCount(n){
+  const rounded = Math.round(n * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 }
 
 // sorts jobs by the canonical round order (from the round-order reference file), falling
@@ -1134,11 +1276,12 @@ async function renderWorker(){
   const bar = document.createElement('div');
 
   function refreshStats(){
-    const doneCount = jobs.filter(j=>prog[j.id] && prog[j.id].status==='done').length;
+    const doneCount = jobs.reduce((s,j)=> s + (prog[j.id] && prog[j.id].status==='done' ? jobWeight(j) : 0), 0);
+    const totalWeighted = jobs.reduce((s,j)=> s + jobWeight(j), 0);
     const collected = jobs.reduce((s,j)=> s + (prog[j.id]?.payment ? parseFloat(prog[j.id].payment)||0 : 0), 0);
-    const remaining = jobs.length - jobs.filter(j=>prog[j.id] && prog[j.id].status!=='todo').length;
+    const remaining = totalWeighted - jobs.reduce((s,j)=> s + (prog[j.id] && prog[j.id].status!=='todo' ? jobWeight(j) : 0), 0);
     const doneStat = header.querySelector('#topDoneStat');
-    if(doneStat) doneStat.textContent = `${doneCount}/${jobs.length} done`;
+    if(doneStat) doneStat.textContent = `${formatJobCount(doneCount)}/${formatJobCount(totalWeighted)} done`;
     const collectedStat = header.querySelector('#topCollectedStat');
     if(collectedStat) collectedStat.textContent = money(collected);
     const leftEl = bar.querySelector('#leftStatN');
@@ -1197,6 +1340,22 @@ async function renderWorker(){
   const completedJobs = sorted.filter(j=> prog[j.id] && prog[j.id].status!=='todo');
   const customFrontPrices = await loadCustomFrontPrices();
 
+  // split jobs (worked on by two people at once) need data from the OTHER worker's
+  // phone — fetched once up front here, since the two cards live on separate screens
+  // and can't read each other's DOM the way same-page linked jobs do
+  const linkedDataMap = new Map();
+  await Promise.all(sorted.map(async j=>{
+    if(j.isSubJob && j.mainJobWorker && j.mainJobId){
+      const [mJobs, mProg] = await Promise.all([loadJobs(j.mainJobWorker, date), loadProgress(j.mainJobWorker, date)]);
+      const mainJob = (mJobs||[]).find(mj=>mj.id===j.mainJobId);
+      if(mainJob) linkedDataMap.set(j.id, { kind:'sub', mainJob, mainProg: mProg||{} });
+    } else if(j.subJobWorker && j.subJobId){
+      const subProg = await loadProgress(j.subJobWorker, date);
+      const subP = (subProg||{})[j.subJobId] || {};
+      linkedDataMap.set(j.id, { kind:'main', subPayment: parseFloat(subP.payment)||0 });
+    }
+  }));
+
   const balanceLinkHandlers = new Map(); // job.id -> recompute function, wired up after all cards exist
 
   function renderGroup(list, onCard){
@@ -1209,10 +1368,16 @@ async function renderWorker(){
         main.appendChild(rl);
         lastRound = job.round;
       }
-      const card = renderJobCard(worker,date,job,prog,refreshStats,isSuper,null,checkDanglingCancelled,()=>{
-        const fn = balanceLinkHandlers.get(job.id);
-        if(fn) fn();
-      },customFrontPrices);
+      const linked = linkedDataMap.get(job.id);
+      let card;
+      if(linked && linked.kind === 'sub'){
+        card = renderSubJobCard(worker,date,job,prog,linked.mainJob,linked.mainProg,refreshStats);
+      } else {
+        card = renderJobCard(worker,date,job,prog,refreshStats,isSuper,null,checkDanglingCancelled,()=>{
+          const fn = balanceLinkHandlers.get(job.id);
+          if(fn) fn();
+        },customFrontPrices,linked && linked.kind === 'main' ? linked.subPayment : 0);
+      }
       main.appendChild(card);
       if(onCard) onCard(job, card);
     });
@@ -1271,11 +1436,11 @@ async function renderWorker(){
 
   // footer summary / finish
   bar.className = 'summary-bar';
-  const doneCount = jobs.filter(j=>prog[j.id] && prog[j.id].status==='done').length;
+  const totalWeighted = jobs.reduce((s,j)=> s + jobWeight(j), 0);
   const collected = jobs.reduce((s,j)=> s + (prog[j.id]?.payment ? parseFloat(prog[j.id].payment)||0 : 0), 0);
-  const remaining = jobs.length - jobs.filter(j=>prog[j.id] && prog[j.id].status!=='todo').length;
+  const remaining = totalWeighted - jobs.reduce((s,j)=> s + (prog[j.id] && prog[j.id].status!=='todo' ? jobWeight(j) : 0), 0);
   bar.innerHTML = `
-    <div class="sum-pill"><div class="n" id="leftStatN">${remaining}</div><div class="l">Left</div></div>
+    <div class="sum-pill"><div class="n" id="leftStatN">${formatJobCount(remaining)}</div><div class="l">Left</div></div>
     <div class="sum-pill"><div class="n" id="collectedStatN">${money(collected)}</div><div class="l">Collected</div></div>
     <button class="finish-btn" id="finishBtn">Day summary</button>
   `;
@@ -1286,16 +1451,18 @@ async function renderWorker(){
   if(selectBtn){
     let selectMode = false;
     const selectedIds = new Set();
+    const splitIds = new Set();
 
     function renderMoveBar(){
       const existing = moveBarContainer.querySelector('.move-bar.select-bar');
       if(existing) existing.remove();
-      if(!selectMode || selectedIds.size===0) return;
+      const allIds = new Set([...selectedIds, ...splitIds]);
+      if(!selectMode || allIds.size===0) return;
       const others = WORKERS.filter(w=>w!==worker);
       const mb = document.createElement('div');
       mb.className = 'move-bar select-bar';
       mb.innerHTML = `
-        <div class="move-bar-label">${selectedIds.size} selected — send to</div>
+        <div class="move-bar-label">${allIds.size} selected${splitIds.size ? ` (${splitIds.size} split)` : ''} — send to</div>
         <div class="move-bar-targets">
           ${others.map(w=>`<button type="button" class="move-target-btn" data-target="${escapeHtml(w)}">${escapeHtml(w)}</button>`).join('')}
         </div>
@@ -1304,11 +1471,15 @@ async function renderWorker(){
       mb.querySelectorAll('.move-target-btn').forEach(btn=>{
         btn.onclick = async ()=>{
           const target = btn.dataset.target;
-          const ids = Array.from(selectedIds);
+          const ids = Array.from(allIds);
+          const splitIdsArr = ids.filter(id=>splitIds.has(id));
+          const normalIds = ids.filter(id=>!splitIds.has(id));
           btn.disabled = true;
-          await moveJobsToWorker(worker, target, date, ids);
-          toast(`Moved ${ids.length} job${ids.length===1?'':'s'} to ${target}`);
-          state.lastMove = { from:worker, to:target, date, ids };
+          if(normalIds.length) await moveJobsToWorker(worker, target, date, normalIds);
+          if(splitIdsArr.length) await splitAndSendJobs(worker, date, splitIdsArr, target);
+          toast(`Sent ${ids.length} job${ids.length===1?'':'s'} to ${target}${splitIdsArr.length ? ` (${splitIdsArr.length} split — "back" card${splitIdsArr.length===1?'':'s'} left with you)` : ''}`);
+          // undo only covers the plain moves — a split is more than a simple move to reverse cleanly
+          state.lastMove = { from:worker, to:target, date, ids: normalIds };
           render();
         };
       });
@@ -1318,8 +1489,10 @@ async function renderWorker(){
       selectMode = on;
       selectBtn.textContent = selectMode ? 'Cancel' : 'Select';
       selectedIds.clear();
+      splitIds.clear();
       todoCardMap.forEach((card,jobId)=>{
         let cb = card.querySelector('.job-select-checkbox');
+        let splitWrap = card.querySelector('.job-split-wrap');
         if(selectMode){
           card.classList.add('selectable');
           if(!cb){
@@ -1327,10 +1500,22 @@ async function renderWorker(){
             cb.type = 'checkbox';
             cb.className = 'job-select-checkbox';
             cb.addEventListener('change', ()=>{
-              if(cb.checked) selectedIds.add(jobId); else selectedIds.delete(jobId);
+              if(cb.checked) selectedIds.add(jobId);
+              else selectedIds.delete(jobId);
               renderMoveBar();
             });
             card.appendChild(cb);
+          }
+          if(!splitWrap){
+            splitWrap = document.createElement('div');
+            splitWrap.className = 'job-split-wrap';
+            splitWrap.innerHTML = `<input type="checkbox" class="job-split-checkbox" title="Split: send the front, keep a back card for a second worker"><span>SPLIT</span>`;
+            card.appendChild(splitWrap);
+            splitWrap.querySelector('.job-split-checkbox').addEventListener('change', (e)=>{
+              if(e.target.checked) splitIds.add(jobId);
+              else splitIds.delete(jobId);
+              renderMoveBar();
+            });
           }
           const shouldCheck = !!(initialIds && initialIds.includes(jobId));
           cb.checked = shouldCheck;
@@ -1338,6 +1523,7 @@ async function renderWorker(){
         } else {
           card.classList.remove('selectable');
           if(cb) cb.remove();
+          if(splitWrap) splitWrap.remove();
         }
       });
       renderMoveBar();
@@ -1385,8 +1571,9 @@ async function renderWorker(){
   armScreenGuard();
 }
 
-function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,onAnyStatusChange,onBalanceChange,customFrontPrices){
+function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,onAnyStatusChange,onBalanceChange,customFrontPrices,linkedPayment){
   customFrontPrices = customFrontPrices || {};
+  linkedPayment = parseFloat(linkedPayment) || 0;
   const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'', frontApplied:false, cancelled:false };
   const card = document.createElement('div');
   const vRound = isVRound(job.round);
@@ -1472,7 +1659,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     const payment = parseFloat(payInput.value) || 0;
     const notCleaned = currentStatus === 'skipped';
     const chargeToday = notCleaned ? 0 : currentPrice();
-    const owedAfter = debt + chargeToday - payment;
+    const owedAfter = debt + chargeToday - payment - linkedPayment;
     const el = card.querySelector('.balance-value');
     const labelEl = card.querySelector('.balance-label');
     if(labelEl) labelEl.textContent = notCleaned ? 'Current balance' : "Today's balance";
@@ -1548,6 +1735,11 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
       if(refreshStats) refreshStats();
       scheduleReflow(job.id, worker, date);
       if(onAnyStatusChange) onAnyStatusChange(job.id);
+      if(job.subJobWorker && (newStatus === 'skipped' || (newCancelled && newStatus !== 'done'))){
+        rejectSubJobForMainStatus(worker, job, date);
+        delete job.subJobWorker;
+        delete job.subJobId;
+      }
     };
   });
 
@@ -1654,6 +1846,118 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     persist(current=>{ current.payment = payInput.value; });
     if(refreshStats) refreshStats();
     scheduleReflow(job.id, worker, date);
+  });
+
+  card.querySelector('.note-field textarea').addEventListener('input', (e)=>{
+    persist(current=>{ current.note = e.target.value; });
+    scheduleReflow(job.id, worker, date);
+  });
+
+  return card;
+}
+
+// the simplified "back" card shown to a second worker on a split job — a job two
+// (rarely three) people work on together at once. Just enough to be useful in the
+// field: address, contact, notes, a read-only price to quote if asked, cash paid,
+// the shared balance, and a single Done button. No Skip/Cancel here — if the main
+// card ends up skipped or cancelled, this card gets rejected back automatically,
+// since the main card already reports that outcome for the whole job.
+function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats){
+  const p = prog[job.id] || { status:'todo', payment:'', note:'' };
+  const card = document.createElement('div');
+  card.className = `card job-card sub-job-card status-${p.status}`;
+
+  const debt = -job.balance; // positive = customer owes
+  const mainP = mainProg[mainJob.id] || { status:'todo', payment:'', price:'' };
+  const mainPriceVal = (mainP.price !== undefined && mainP.price !== '' && !isNaN(parseFloat(mainP.price))) ? parseFloat(mainP.price) : mainJob.price;
+  const mainPayment = parseFloat(mainP.payment) || 0;
+  const mainNotCleaned = mainP.status === 'skipped';
+  const telHref = job.phone ? `tel:${job.phone.replace(/[^0-9+]/g,'')}` : '';
+
+  card.innerHTML = `
+    <div class="wipe"></div>
+    <div class="job-top">
+      <div class="job-info">
+        <div class="addr">${escapeHtml(job.address)}</div>
+        <div class="cust-row">
+          <span class="cust">${escapeHtml(job.customer)}</span>
+          ${job.phone ? `<a class="phone-btn" href="${telHref}">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none"><path d="M6 3h3l2 5-2.5 1.5a11 11 0 005 5L15 12l5 2v3a2 2 0 01-2 2A16 16 0 014 6a2 2 0 012-2z" fill="currentColor"/></svg>
+            ${escapeHtml(job.phone)}
+          </a>` : ''}
+        </div>
+        ${job.notes ? `<div class="notes">⚠ ${escapeHtml(job.notes)}</div>` : ''}
+      </div>
+      <div class="price-block">
+        <div class="nav-icon-btn" style="font-size:10.5px;font-weight:800;color:#fff;letter-spacing:.03em;">BACK</div>
+        <div class="price-edit"><span class="pfx">£</span><input type="number" class="price-input" value="${mainPriceVal.toFixed(2)}" readonly style="background:transparent;border:none;color:var(--ink-soft);"></div>
+      </div>
+    </div>
+    <div class="job-controls">
+      <button class="status-btn ${p.status==='done'?'active-done':''}" data-action="done" style="flex:1;"><span class="ic">✓</span>Done</button>
+    </div>
+    <div class="pay-row">
+      <div class="pay-field">
+        <label>Cash paid</label>
+        <div class="pay-input-wrap"><span class="pfx">£</span><input type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${p.payment || ''}" class="pay-input"></div>
+      </div>
+      <div class="pay-field">
+        <label class="balance-label">Today's balance</label>
+        <div class="balance-value"></div>
+      </div>
+    </div>
+    <div class="note-field">
+      <label>Job note</label>
+      <textarea rows="2">${escapeHtml(p.note || '')}</textarea>
+    </div>
+  `;
+
+  let currentStatus = p.status;
+  const payInput = card.querySelector('.pay-input');
+
+  function updateOwedAfter(){
+    const payment = parseFloat(payInput.value) || 0;
+    const chargeToday = mainNotCleaned ? 0 : mainPriceVal;
+    const owedAfter = debt + chargeToday - payment - mainPayment;
+    const el = card.querySelector('.balance-value');
+    if(owedAfter > 0.004) el.innerHTML = `<b style="color:var(--red)">${money(owedAfter)}</b>`;
+    else if(owedAfter < -0.004) el.innerHTML = `<b style="color:var(--green)">${money(-owedAfter)} credit</b>`;
+    else el.innerHTML = `<b style="color:var(--green)">£0.00</b>`;
+  }
+  updateOwedAfter();
+
+  async function persist(mutator){
+    const current = prog[job.id] ? Object.assign({}, prog[job.id]) : { status:'todo', payment:'', note:'' };
+    mutator(current);
+    prog[job.id] = current;
+    await saveProgress(worker, date, prog);
+  }
+
+  card.querySelector('[data-action="done"]').onclick = async ()=>{
+    const newStatus = currentStatus === 'done' ? 'todo' : 'done';
+    await persist(current=>{ current.status = newStatus; });
+    currentStatus = newStatus;
+    const btn = card.querySelector('[data-action="done"]');
+    btn.classList.toggle('active-done', newStatus==='done');
+    card.className = `card job-card sub-job-card status-${newStatus}`;
+    if(newStatus === 'done'){
+      card.querySelector('.wipe').classList.add('play');
+    }
+    if(refreshStats) refreshStats();
+    scheduleReflow(job.id, worker, date);
+  };
+
+  payInput.addEventListener('input', ()=>{
+    updateOwedAfter();
+    persist(current=>{ current.payment = payInput.value; });
+    scheduleReflow(job.id, worker, date);
+  });
+  payInput.addEventListener('blur', ()=>{
+    if(payInput.value !== ''){
+      payInput.value = (parseFloat(payInput.value)||0).toFixed(2);
+      updateOwedAfter();
+      persist(current=>{ current.payment = payInput.value; });
+    }
   });
 
   card.querySelector('.note-field textarea').addEventListener('input', (e)=>{
@@ -1885,16 +2189,18 @@ async function renderDaySummary(){
 
   const sortedJobs = jobs.slice().sort((a,b)=>a.order-b.order);
 
-  let collected=0, doneN=0, skippedN=0, cancelledN=0, notDoneN=0, outstanding=0;
+  let collected=0, doneN=0, skippedN=0, cancelledN=0, notDoneN=0, outstanding=0, totalWeighted=0;
   const rows = sortedJobs.map(j=>{
     const p = prog[j.id] || {status:'todo',payment:0};
     const payment = parseFloat(p.payment)||0;
     const price = resolvedPrice(j,p);
+    const weight = jobWeight(j);
     collected += payment;
-    if(p.status==='done') doneN++;
-    if(p.status==='skipped') skippedN++;
-    if(p.cancelled) cancelledN++;
-    if(p.status==='todo') notDoneN++;
+    totalWeighted += weight;
+    if(p.status==='done') doneN += weight;
+    if(p.status==='skipped') skippedN += weight;
+    if(p.cancelled) cancelledN += weight;
+    if(p.status==='todo') notDoneN += weight;
     const debt = -j.balance;
     const owedAfter = debt + chargeForStatus(price,p.status) - payment;
     outstanding += owedAfter;
@@ -1935,10 +2241,10 @@ async function renderDaySummary(){
   card.innerHTML = `
     <div class="section-title">Today's totals</div>
     <table class="report">
-      <tr><td>Jobs done</td><td class="num">${doneN} / ${jobs.length}</td></tr>
-      <tr><td>Skipped</td><td class="num">${skippedN}</td></tr>
-      <tr><td>Cancelled</td><td class="num">${cancelledN}</td></tr>
-      <tr><td>Not done</td><td class="num">${notDoneN}</td></tr>
+      <tr><td>Jobs done</td><td class="num">${formatJobCount(doneN)} / ${formatJobCount(totalWeighted)}</td></tr>
+      <tr><td>Skipped</td><td class="num">${formatJobCount(skippedN)}</td></tr>
+      <tr><td>Cancelled</td><td class="num">${formatJobCount(cancelledN)}</td></tr>
+      <tr><td>Not done</td><td class="num">${formatJobCount(notDoneN)}</td></tr>
       <tr><td>Cash collected</td><td class="num">${money(collected)}</td></tr>
     </table>
   `;
@@ -1954,7 +2260,7 @@ async function renderDaySummary(){
   main.appendChild(btnRow);
 
   btnRow.querySelector('#copyBtn').onclick = ()=>{
-    const text = buildReportText(worker,date,rows,{collected,outstanding,doneN,skippedN,cancelledN,total:jobs.length});
+    const text = buildReportText(worker,date,rows,{collected,outstanding,doneN,skippedN,cancelledN,total:totalWeighted});
     navigator.clipboard.writeText(text).then(()=>toast('Report copied — paste into WhatsApp/text')).catch(()=>{
       const ta = document.createElement('textarea'); ta.value=text; document.body.appendChild(ta);
       ta.select(); document.execCommand('copy'); ta.remove();
@@ -1967,7 +2273,7 @@ async function renderDaySummary(){
 function buildReportText(worker,date,rows,totals){
   let lines = [];
   lines.push(`${worker} — ${date}`);
-  lines.push(`Done ${totals.doneN}/${totals.total} · Skipped ${totals.skippedN} · Cancelled ${totals.cancelledN}`);
+  lines.push(`Done ${formatJobCount(totals.doneN)}/${formatJobCount(totals.total)} · Skipped ${formatJobCount(totals.skippedN)} · Cancelled ${formatJobCount(totals.cancelledN)}`);
   lines.push(`Collected: ${money(totals.collected)}   Outstanding: ${money(totals.outstanding)}`);
   lines.push('');
   rows.forEach(r=>{
@@ -2502,7 +2808,7 @@ function renderAdminReport(main){
         const { jobs, prog } = await loadForReport(w,date);
         return { w, jobs: jobs || [], prog: prog || {} };
       }));
-      let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0, notDoneN=0, totalJobs=0;
+      let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0, notDoneN=0, totalJobs=0, totalWeighted=0;
       const allRows = [];
       const earnedByWorker = {};
       results.forEach(({w, jobs, prog})=>{
@@ -2511,11 +2817,13 @@ function renderAdminReport(main){
           const p = prog[j.id] || {status:'todo',payment:0};
           const payment = parseFloat(p.payment)||0;
           const price = resolvedPrice(j,p);
+          const weight = jobWeight(j);
           collected += payment;
-          if(p.status==='done'){ doneN++; earnedByWorker[w] = (earnedByWorker[w]||0) + price; }
-          if(p.status==='skipped') skippedN++;
-          if(p.cancelled) cancelledN++;
-          if(p.status==='todo') notDoneN++;
+          totalWeighted += weight;
+          if(p.status==='done'){ doneN += weight; earnedByWorker[w] = (earnedByWorker[w]||0) + price * weight; }
+          if(p.status==='skipped') skippedN += weight;
+          if(p.cancelled) cancelledN += weight;
+          if(p.status==='todo') notDoneN += weight;
           const debt = -j.balance;
           const owedAfter = debt + chargeForStatus(price,p.status) - payment;
           outstanding += owedAfter;
@@ -2528,10 +2836,10 @@ function renderAdminReport(main){
       const earnedRows = WORKERS.filter(w=>earnedByWorker[w]);
       out.innerHTML = `
         <table class="report">
-          <tr><td>Jobs done</td><td class="num">${doneN} / ${totalJobs}</td></tr>
-          <tr><td>Skipped</td><td class="num">${skippedN}</td></tr>
-          <tr><td>Cancelled</td><td class="num">${cancelledN}</td></tr>
-          <tr><td>Not done</td><td class="num">${notDoneN}</td></tr>
+          <tr><td>Jobs done</td><td class="num">${formatJobCount(doneN)} / ${formatJobCount(totalWeighted)}</td></tr>
+          <tr><td>Skipped</td><td class="num">${formatJobCount(skippedN)}</td></tr>
+          <tr><td>Cancelled</td><td class="num">${formatJobCount(cancelledN)}</td></tr>
+          <tr><td>Not done</td><td class="num">${formatJobCount(notDoneN)}</td></tr>
           <tr><td>Cash collected</td><td class="num">${money(collected)}</td></tr>
           <tr><td>Still outstanding</td><td class="num">${money(outstanding)}</td></tr>
         </table>
@@ -2555,16 +2863,18 @@ function renderAdminReport(main){
     if(!jobs || !jobs.length){ out.innerHTML = `<p class="muted">No job list loaded for ${worker} on ${date}.</p>`; return; }
     const prog = progRaw || {};
     const sortedJobs = jobs.slice().sort((a,b)=>a.order-b.order);
-    let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0, notDoneN=0;
+    let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0, notDoneN=0, totalWeighted=0;
     const rows = sortedJobs.map(j=>{
       const p = prog[j.id] || {status:'todo',payment:0};
       const payment = parseFloat(p.payment)||0;
       const price = resolvedPrice(j,p);
+      const weight = jobWeight(j);
       collected += payment;
-      if(p.status==='done') doneN++;
-      if(p.status==='skipped') skippedN++;
-      if(p.cancelled) cancelledN++;
-      if(p.status==='todo') notDoneN++;
+      totalWeighted += weight;
+      if(p.status==='done') doneN += weight;
+      if(p.status==='skipped') skippedN += weight;
+      if(p.cancelled) cancelledN += weight;
+      if(p.status==='todo') notDoneN += weight;
       const debt = -j.balance;
       const owedAfter = debt + chargeForStatus(price,p.status) - payment;
       outstanding += owedAfter;
@@ -2572,10 +2882,10 @@ function renderAdminReport(main){
     });
     out.innerHTML = `
       <table class="report">
-        <tr><td>Jobs done</td><td class="num">${doneN} / ${jobs.length}</td></tr>
-        <tr><td>Skipped</td><td class="num">${skippedN}</td></tr>
-        <tr><td>Cancelled</td><td class="num">${cancelledN}</td></tr>
-        <tr><td>Not done</td><td class="num">${notDoneN}</td></tr>
+        <tr><td>Jobs done</td><td class="num">${formatJobCount(doneN)} / ${formatJobCount(totalWeighted)}</td></tr>
+        <tr><td>Skipped</td><td class="num">${formatJobCount(skippedN)}</td></tr>
+        <tr><td>Cancelled</td><td class="num">${formatJobCount(cancelledN)}</td></tr>
+        <tr><td>Not done</td><td class="num">${formatJobCount(notDoneN)}</td></tr>
         <tr><td>Cash collected</td><td class="num">${money(collected)}</td></tr>
         <tr><td>Still outstanding</td><td class="num">${money(outstanding)}</td></tr>
       </table>
