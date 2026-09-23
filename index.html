@@ -226,6 +226,13 @@
     background:var(--navy);border-radius:11px;text-decoration:none;
   }
   .nav-icon-btn:active{background:var(--navy-deep);}
+  .front-split-badge{
+    flex:none;width:46px;height:46px;
+    display:flex;align-items:center;justify-content:center;
+    background:var(--amber-deep);color:#fff;border:none;border-radius:11px;
+    font-size:10.5px;font-weight:800;letter-spacing:.02em;cursor:pointer;font-family:inherit;
+  }
+  .front-split-badge:active{background:var(--amber);}
 
   .job-controls{display:flex;gap:8px;margin-top:14px;}
   .status-btn{
@@ -599,6 +606,24 @@ async function moveJobsToWorker(fromWorker, toWorker, date, jobIds){
       await saveJobs(mainWorker, date, updated);
     }));
   }
+
+  // the reverse case: if any of the moved jobs are "front" main jobs with a linked
+  // sub-card, follow through and update the sub-job's pointer to match — this is
+  // what lets Undo correctly reverse a front split by moving the main job back
+  const movedMainJobs = moving.filter(j=>j.subJobWorker && j.subJobId);
+  if(movedMainJobs.length){
+    const bySubWorker = {};
+    movedMainJobs.forEach(j=>{
+      (bySubWorker[j.subJobWorker] = bySubWorker[j.subJobWorker] || []).push(j.subJobId);
+    });
+    await Promise.all(Object.entries(bySubWorker).map(async ([subWorker, subJobIds])=>{
+      const idSet3 = new Set(subJobIds);
+      const subJobsList = await loadJobs(subWorker, date);
+      if(!subJobsList) return;
+      const updated = subJobsList.map(sj=> idSet3.has(sj.id) ? Object.assign({}, sj, { mainJobWorker: toWorker }) : sj);
+      await saveJobs(subWorker, date, updated);
+    }));
+  }
 }
 
 // used from Select mode: sends the "front"/main job(s) to targetWorker as normal,
@@ -730,6 +755,22 @@ async function rejectSubJobForMainStatus(mainWorker, mainJob, date){
 // its sender; here there's nowhere sensible to send it back TO, since it only
 // exists because of the split in the first place.
 async function rejectSubJobEntirely(subWorker, subJob, date){
+  if(subWorker === subJob.mainJobWorker){
+    // both halves happen to be held by the same person right now (e.g. mid-undo of
+    // a front split, just after the main job's been moved back) — do this as ONE
+    // combined write, since two separate saveJobs calls to the same list would race
+    const [jobs, prog] = await Promise.all([loadJobs(subWorker, date), loadProgress(subWorker, date)]);
+    const updated = (jobs||[])
+      .filter(j=>j.id!==subJob.id)
+      .map(j=> j.id===subJob.mainJobId ? (({subJobWorker,subJobId,...rest})=>rest)(j) : j);
+    const updatedProg = Object.assign({}, prog);
+    delete updatedProg[subJob.id];
+    await Promise.all([
+      saveJobs(subWorker, date, updated),
+      saveProgress(subWorker, date, updatedProg)
+    ]);
+    return;
+  }
   const [subJobs, subProg] = await Promise.all([loadJobs(subWorker, date), loadProgress(subWorker, date)]);
   const remainingSub = (subJobs||[]).filter(j=>j.id!==subJob.id);
   const remainingSubProg = Object.assign({}, subProg);
@@ -741,6 +782,24 @@ async function rejectSubJobEntirely(subWorker, subJob, date){
     saveProgress(subWorker, date, remainingSubProg),
     saveJobs(subJob.mainJobWorker, date, updatedMain)
   ]);
+}
+
+// reverses a split entirely, for the Undo banner. For a front split (F), the main
+// job currently lives with targetWorker and needs moving back first; for a back
+// split (B), the main job never moved. Either way, once the main job is back with
+// the sender, the linked sub-card just needs deleting and the link cleared —
+// exactly what rejectSubJobEntirely already does.
+async function undoSplit(senderWorker, date, mainJobId, targetWorker, wasFront){
+  if(wasFront){
+    await moveJobsToWorker(targetWorker, senderWorker, date, [mainJobId]);
+  }
+  const senderJobs = await loadJobs(senderWorker, date);
+  const mainJob = (senderJobs||[]).find(j=>j.id===mainJobId);
+  if(mainJob && mainJob.subJobWorker && mainJob.subJobId){
+    const subWorkerJobs = await loadJobs(mainJob.subJobWorker, date);
+    const subJob = (subWorkerJobs||[]).find(j=>j.id===mainJob.subJobId);
+    if(subJob) await rejectSubJobEntirely(mainJob.subJobWorker, subJob, date);
+  }
 }
 
 /* ================= CSV PARSING ================= */
@@ -1021,6 +1080,7 @@ function startWorkerPoll(worker, date, currentJobs){
 
   async function computeLinkedSignature(){
     if(!splitJobs.length) return '';
+    const myProg = await loadProgress(worker, date);
     const parts = await Promise.all(splitJobs.map(async j=>{
       if(j.isSubJob && j.mainJobWorker && j.mainJobId){
         const mProg = await loadProgress(j.mainJobWorker, date);
@@ -1029,7 +1089,8 @@ function startWorkerPoll(worker, date, currentJobs){
       } else if(j.subJobWorker && j.subJobId){
         const sProg = await loadProgress(j.subJobWorker, date);
         const sp = (sProg||{})[j.subJobId] || {};
-        return j.id + ':' + (sp.payment||'');
+        const myPrice = (myProg[j.id]||{}).price || '';
+        return j.id + ':' + (sp.payment||'') + ':' + myPrice;
       }
       return '';
     }));
@@ -1556,8 +1617,7 @@ async function renderWorker(){
           if(backIdsArr.length) await splitAndKeepFront(worker, date, backIdsArr, target);
           const splitTotal = frontIdsArr.length + backIdsArr.length;
           toast(`Sent ${ids.length} job${ids.length===1?'':'s'} to ${target}${splitTotal ? ` (${splitTotal} split)` : ''}`);
-          // undo only covers the plain moves — a split is more than a simple move to reverse cleanly
-          state.lastMove = { from:worker, to:target, date, ids: normalIds };
+          state.lastMove = { from:worker, to:target, date, ids: normalIds, frontSplitIds: frontIdsArr, backSplitIds: backIdsArr };
           render();
         };
       });
@@ -1655,29 +1715,39 @@ async function renderWorker(){
 
     // show an Undo banner for the most recent move Simon made from this list
     if(state.lastMove && state.lastMove.from===worker && state.lastMove.date===date){
-      const { to, ids } = state.lastMove;
-      const banner = document.createElement('div');
-      banner.className = 'move-bar undo-bar';
-      banner.innerHTML = `
-        <div class="move-bar-label">Moved ${ids.length} job${ids.length===1?'':'s'} to ${escapeHtml(to)}</div>
-        <div class="move-bar-targets">
-          <button type="button" class="move-target-btn" id="undoMoveBtn">Undo</button>
-          <button type="button" class="move-target-btn move-dismiss-btn" id="dismissMoveBtn">Dismiss</button>
-        </div>
-      `;
-      moveBarContainer.appendChild(banner);
-      banner.querySelector('#undoMoveBtn').onclick = async ()=>{
-        banner.remove();
-        await moveJobsToWorker(to, worker, date, ids);
-        toast(`Brought back ${ids.length} job${ids.length===1?'':'s'}`);
-        state.pendingSelection = ids;
-        delete state.lastMove;
-        render();
-      };
-      banner.querySelector('#dismissMoveBtn').onclick = ()=>{
-        delete state.lastMove;
-        banner.remove();
-      };
+      const { to, ids, frontSplitIds, backSplitIds } = state.lastMove;
+      const plainIds = ids || [];
+      const frontIdsArr = frontSplitIds || [];
+      const backIdsArr = backSplitIds || [];
+      const totalCount = plainIds.length + frontIdsArr.length + backIdsArr.length;
+      if(totalCount > 0){
+        const banner = document.createElement('div');
+        banner.className = 'move-bar undo-bar';
+        banner.innerHTML = `
+          <div class="move-bar-label">Moved ${totalCount} job${totalCount===1?'':'s'} to ${escapeHtml(to)}</div>
+          <div class="move-bar-targets">
+            <button type="button" class="move-target-btn" id="undoMoveBtn">Undo</button>
+            <button type="button" class="move-target-btn move-dismiss-btn" id="dismissMoveBtn">Dismiss</button>
+          </div>
+        `;
+        moveBarContainer.appendChild(banner);
+        banner.querySelector('#undoMoveBtn').onclick = async ()=>{
+          banner.remove();
+          if(plainIds.length) await moveJobsToWorker(to, worker, date, plainIds);
+          await Promise.all([
+            ...frontIdsArr.map(id=> undoSplit(worker, date, id, to, true)),
+            ...backIdsArr.map(id=> undoSplit(worker, date, id, to, false))
+          ]);
+          toast(`Brought back ${totalCount} job${totalCount===1?'':'s'}`);
+          state.pendingSelection = [...plainIds, ...frontIdsArr, ...backIdsArr];
+          delete state.lastMove;
+          render();
+        };
+        banner.querySelector('#dismissMoveBtn').onclick = ()=>{
+          delete state.lastMove;
+          banner.remove();
+        };
+      }
     }
 
     // if we just undid a move, re-enter select mode with those jobs pre-checked
@@ -1724,7 +1794,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
         <a class="nav-icon-btn" href="${navUrl(job)}" target="_blank" rel="noopener" title="Navigate">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M3 11l17-8-8 17-2-7-7-2z" fill="#fff"/></svg>
         </a>
-        <button type="button" class="front" title="Tap to charge the front price instead"><span style="font-size:16px;">FO</span></button>
+        ${job.subJobWorker ? `<button type="button" class="front-split-badge" title="Split with ${escapeHtml(job.subJobWorker)} — tap if you can only do the front">FRONT</button>` : `<button type="button" class="front" title="Tap to charge the front price instead"><span style="font-size:16px;">FO</span></button>`}
         <div class="price-edit"><span class="pfx">£</span><input type="number" class="price-input" inputmode="decimal" min="0" step="0.01" value="${parseFloat(priceVal).toFixed(2)}"></div>
       </div>
     </div>
@@ -1913,6 +1983,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
 
   function updateFrontButton(){
     const btn = card.querySelector('.front');
+    if(!btn) return;
     btn.innerHTML = frontApplied ? 'ALL' : '<span style="font-size:16px;">FO</span>';
     btn.classList.toggle('front-active', frontApplied);
     btn.title = frontApplied ? 'Tap to charge for all the house windows instead' : 'Tap to charge the front-only price instead';
@@ -1936,16 +2007,35 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     }
   });
 
-  card.querySelector('.front').onclick = ()=>{
-    frontApplied = !frontApplied;
-    const frontPriceToUse = (customFrontPrices[job.id] !== undefined && customFrontPrices[job.id] !== null) ? customFrontPrices[job.id] : job.frontPrice;
-    priceInput.value = (frontApplied ? frontPriceToUse : job.price).toFixed(2);
-    updateOwedAfter();
-    if(onBalanceChange) onBalanceChange();
-    updateFrontButton();
-    persist(current=>{ current.price = priceInput.value; current.frontApplied = frontApplied; });
-    scheduleReflow(job.id, worker, date);
-  };
+  const frontBtn = card.querySelector('.front');
+  if(frontBtn){
+    frontBtn.onclick = ()=>{
+      frontApplied = !frontApplied;
+      const frontPriceToUse = (customFrontPrices[job.id] !== undefined && customFrontPrices[job.id] !== null) ? customFrontPrices[job.id] : job.frontPrice;
+      priceInput.value = (frontApplied ? frontPriceToUse : job.price).toFixed(2);
+      updateOwedAfter();
+      if(onBalanceChange) onBalanceChange();
+      updateFrontButton();
+      persist(current=>{ current.price = priceInput.value; current.frontApplied = frontApplied; });
+      scheduleReflow(job.id, worker, date);
+    };
+  }
+
+  const frontSplitBadge = card.querySelector('.front-split-badge');
+  if(frontSplitBadge){
+    frontSplitBadge.onclick = async ()=>{
+      if(!confirm(`This job is split with ${job.subJobWorker} doing the back. Convert to front-only? This removes their "back" card completely — use this if you can only do the front today (e.g. a locked gate).`)) return;
+      frontSplitBadge.disabled = true;
+      frontSplitBadge.textContent = 'Removing…';
+      const subWorkerJobs = await loadJobs(job.subJobWorker, date);
+      const subJob = (subWorkerJobs||[]).find(j=>j.id===job.subJobId);
+      if(subJob) await rejectSubJobEntirely(job.subJobWorker, subJob, date);
+      const frontPriceToUse = (customFrontPrices[job.id] !== undefined && customFrontPrices[job.id] !== null) ? customFrontPrices[job.id] : job.frontPrice;
+      await persist(current=>{ current.price = frontPriceToUse.toFixed(2); current.frontApplied = true; });
+      toast('Converted to front-only — removed the back card');
+      render();
+    };
+  }
 
   payInput.addEventListener('focus', ()=>{
     if(payInput.value === ''){
@@ -2012,7 +2102,7 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats){
       </div>
       <div class="price-block">
         <div class="nav-icon-btn" style="font-size:10.5px;font-weight:800;color:#fff;letter-spacing:.03em;">BACK</div>
-        <div class="price-edit"><span class="pfx">£</span><input type="number" class="price-input" value="${mainPriceVal.toFixed(2)}" readonly style="background:transparent;border:none;color:var(--ink-soft);"></div>
+        <div class="price-edit"><span class="pfx">£</span><input type="number" class="price-input" inputmode="decimal" min="0" step="0.01" value="${mainPriceVal.toFixed(2)}"></div>
       </div>
     </div>
     <div class="job-controls">
@@ -2037,10 +2127,13 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats){
 
   let currentStatus = p.status;
   const payInput = card.querySelector('.pay-input');
+  const priceInput = card.querySelector('.price-input');
+
+  function currentPrice(){ return parseFloat(priceInput.value) || 0; }
 
   function updateOwedAfter(){
     const payment = parseFloat(payInput.value) || 0;
-    const chargeToday = mainNotCleaned ? 0 : mainPriceVal;
+    const chargeToday = mainNotCleaned ? 0 : currentPrice();
     const owedAfter = debt + chargeToday - payment - mainPayment;
     const el = card.querySelector('.balance-value');
     if(owedAfter > 0.004) el.innerHTML = `<b style="color:var(--red)">${money(owedAfter)}</b>`;
@@ -2054,6 +2147,18 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats){
     mutator(current);
     prog[job.id] = current;
     await saveProgress(worker, date, prog);
+  }
+
+  // the price is shared with the main card — editing it here writes straight into
+  // the main job's own progress, since that's the single source of truth both
+  // cards read from (e.g. the customer asks for a bit more or less while paying
+  // whoever's there for the back)
+  async function persistMainPrice(newPrice){
+    const freshMainProg = await loadProgress(job.mainJobWorker, date);
+    const current = freshMainProg[job.mainJobId] ? Object.assign({}, freshMainProg[job.mainJobId]) : { status:'todo', payment:'', price:'', frontApplied:false, cancelled:false };
+    current.price = newPrice;
+    freshMainProg[job.mainJobId] = current;
+    await saveProgress(job.mainJobWorker, date, freshMainProg);
   }
 
   card.querySelector('[data-action="done"]').onclick = async ()=>{
@@ -2080,6 +2185,19 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats){
       payInput.value = (parseFloat(payInput.value)||0).toFixed(2);
       updateOwedAfter();
       persist(current=>{ current.payment = payInput.value; });
+    }
+  });
+
+  priceInput.addEventListener('input', ()=>{
+    updateOwedAfter();
+    persistMainPrice(priceInput.value);
+    scheduleReflow(job.id, worker, date);
+  });
+  priceInput.addEventListener('blur', ()=>{
+    if(priceInput.value !== ''){
+      priceInput.value = currentPrice().toFixed(2);
+      updateOwedAfter();
+      persistMainPrice(priceInput.value);
     }
   });
 
