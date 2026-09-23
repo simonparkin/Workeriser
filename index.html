@@ -1650,13 +1650,15 @@ async function renderWorker(){
         let allLabel = card.querySelector('.job-select-label');
         let frontWrap = card.querySelector('.job-front-wrap');
         let backWrap = card.querySelector('.job-back-wrap');
+        const jobObj = todoJobs.find(j=>j.id===jobId);
+        const isSub = !!(jobObj && jobObj.isSubJob);
         if(selectMode){
           card.classList.add('selectable');
           if(!cb){
             cb = document.createElement('input');
             cb.type = 'checkbox';
             cb.className = 'job-select-checkbox';
-            cb.title = 'ALL: send this job as a whole';
+            cb.title = isSub ? 'Select this job' : 'ALL: send this job as a whole';
             cb.addEventListener('change', ()=>{
               if(cb.checked){
                 selectedIds.add(jobId);
@@ -1673,6 +1675,12 @@ async function renderWorker(){
             });
             card.appendChild(cb);
           }
+          if(isSub){
+            // a sub-card is already half a job — it can't be split further
+            if(allLabel) allLabel.remove();
+            if(frontWrap) frontWrap.remove();
+            if(backWrap) backWrap.remove();
+          } else {
           if(!allLabel){
             allLabel = document.createElement('div');
             allLabel.className = 'job-select-label';
@@ -1713,6 +1721,7 @@ async function renderWorker(){
               renderMoveBar();
             });
           }
+          } // end of non-sub-card branch
           const shouldCheck = !!(initialIds && initialIds.includes(jobId));
           cb.checked = shouldCheck;
           if(shouldCheck) selectedIds.add(jobId);
