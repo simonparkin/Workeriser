@@ -1188,6 +1188,22 @@ function jobWeight(job){
   return (job.isSubJob || job.subJobWorker) ? 0.5 : 1;
 }
 
+// splits a job's earned value between front and back using the actual front-only
+// price on record (the formula, or a worker's real-world correction) rather than a
+// blanket 50/50 — the £1 taken off the front-only price accounts for it normally
+// including a standalone-visit surcharge that doesn't apply when it's done as one
+// combined visit with someone else. A job that isn't currently split earns its
+// full price as normal.
+function splitEarnedShare(job, fullPrice, customFrontPrices){
+  if(!job.isSubJob && !job.subJobWorker) return fullPrice;
+  const refId = job.isSubJob ? job.mainJobId : job.id;
+  const foPrice = (customFrontPrices[refId] !== undefined && customFrontPrices[refId] !== null)
+    ? customFrontPrices[refId]
+    : (job.frontPrice || Math.ceil(fullPrice/2 + 1));
+  const frontShare = Math.max(0, foPrice - 1);
+  return job.isSubJob ? Math.max(0, fullPrice - frontShare) : frontShare;
+}
+
 // formats a possibly-fractional job count for display — "3" stays "3", a half-job
 // total like 3.5 keeps its one decimal place rather than showing 3.500000001 etc.
 function formatJobCount(n){
@@ -3059,6 +3075,19 @@ function renderAdminReport(main){
         const { jobs, prog } = await loadForReport(w,date);
         return { w, jobs: jobs || [], prog: prog || {} };
       }));
+      const customFrontPrices = await loadCustomFrontPrices();
+      const progByWorker = {};
+      results.forEach(({w,prog})=>{ progByWorker[w] = prog; });
+      // a sub-card's price edits are written to the MAIN job's own progress, not its
+      // own — so its own progress never carries a price, and resolvedPrice() would
+      // otherwise fall back to a frozen snapshot from when the split was created
+      function resolveJobPrice(j, p){
+        if(j.isSubJob && j.mainJobWorker && j.mainJobId){
+          const mainProg = progByWorker[j.mainJobWorker] || {};
+          return resolvedPrice(j, mainProg[j.mainJobId]);
+        }
+        return resolvedPrice(j, p);
+      }
       let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0, notDoneN=0, totalJobs=0, totalWeighted=0;
       const allRows = [];
       const earnedByWorker = {};
@@ -3067,11 +3096,11 @@ function renderAdminReport(main){
         jobs.slice().sort((a,b)=>a.order-b.order).forEach(j=>{
           const p = prog[j.id] || {status:'todo',payment:0};
           const payment = parseFloat(p.payment)||0;
-          const price = resolvedPrice(j,p);
+          const price = resolveJobPrice(j,p);
           const weight = jobWeight(j);
           collected += payment;
           totalWeighted += weight;
-          if(p.status==='done'){ doneN += weight; earnedByWorker[w] = (earnedByWorker[w]||0) + price * weight; }
+          if(p.status==='done'){ doneN += weight; earnedByWorker[w] = (earnedByWorker[w]||0) + splitEarnedShare(j, price, customFrontPrices); }
           if(p.status==='skipped') skippedN += weight;
           if(p.cancelled) cancelledN += weight;
           if(p.status==='todo') notDoneN += weight;
