@@ -2578,9 +2578,10 @@ function downloadReportCSV(worker,date,rows){
 }
 
 function downloadReportCSVMulti(date,rows){
-  let csv = 'Worker,Customer,Address,Round,ListPrice,PriceCharged,Status,Cancelled,CashTaken,OwedAfter,Note\n';
+  let csv = 'Worked by,Customer,Address,Round,ListPrice,PriceCharged,Status,Cancelled,CashTaken,OwedAfter,Note\n';
   rows.forEach(r=>{
-    csv += [r.worker,r.job.customer,r.job.address,r.job.round,r.job.price.toFixed(2),r.price.toFixed(2),statusLabel(r.status),r.cancelled?'Yes':'No',r.payment.toFixed(2),r.owedAfter.toFixed(2),r.note||'']
+    const workedBy = (r.workedBy || [r.worker]).join(' & ');
+    csv += [workedBy,r.job.customer,r.job.address,r.job.round,r.job.price.toFixed(2),r.price.toFixed(2),statusLabel(r.status),r.cancelled?'Yes':'No',r.payment.toFixed(2),r.owedAfter.toFixed(2),r.note||'']
       .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',') + '\n';
   });
   const blob = new Blob([csv],{type:'text/csv'});
@@ -3097,7 +3098,7 @@ function renderAdminReport(main){
         }
         return resolvedPrice(j, p);
       }
-      let collected=0, outstanding=0, doneN=0, skippedN=0, cancelledN=0, notDoneN=0, totalJobs=0, totalWeighted=0;
+      let collected=0, doneN=0, skippedN=0, cancelledN=0, notDoneN=0, totalJobs=0, totalWeighted=0;
       const allRows = [];
       const earnedByWorker = {};
       results.forEach(({w, jobs, prog})=>{
@@ -3115,13 +3116,49 @@ function renderAdminReport(main){
           if(p.status==='todo') notDoneN += weight;
           const debt = -j.balance;
           const owedAfter = debt + chargeForStatus(price,p.status) - payment;
-          outstanding += owedAfter;
           allRows.push({worker:w,job:j,status:p.status,cancelled:!!p.cancelled,payment,price,note:p.note||'',owedAfter,frontApplied:!!p.frontApplied});
         });
       });
       if(!totalJobs){ out.innerHTML = `<p class="muted">No job lists loaded for ${date} yet.</p>`; return; }
       const lookup = await loadCoordLookup();
-      allRows.sort((a,b)=> roundOrderRank(a.job,lookup) - roundOrderRank(b.job,lookup));
+
+      // a split job appears twice in allRows (once per worker) — merge each pair into
+      // one row for the table, since Aworka only knows about one job per address and
+      // two rows makes reconciliation harder. This also fixes the balance itself:
+      // each half's own row only knew about its own payment, not the other half's.
+      const mergedRows = [];
+      const consumedIds = new Set();
+      allRows.forEach(r=>{
+        if(consumedIds.has(r.job.id)) return;
+        let mainRow = null, subRow = null;
+        if(r.job.isSubJob && r.job.mainJobWorker && r.job.mainJobId){
+          subRow = r;
+          mainRow = allRows.find(o=>o.worker===r.job.mainJobWorker && o.job.id===r.job.mainJobId);
+        } else if(r.job.subJobWorker && r.job.subJobId){
+          mainRow = r;
+          subRow = allRows.find(o=>o.worker===r.job.subJobWorker && o.job.id===r.job.subJobId);
+        }
+        if(mainRow && subRow){
+          consumedIds.add(mainRow.job.id);
+          consumedIds.add(subRow.job.id);
+          const combinedPayment = mainRow.payment + subRow.payment;
+          const debt = -mainRow.job.balance;
+          const combinedOwed = debt + chargeForStatus(mainRow.price, mainRow.status) - combinedPayment;
+          mergedRows.push({
+            workedBy: [mainRow.worker, subRow.worker],
+            worker: mainRow.worker,
+            job: mainRow.job, status: mainRow.status, cancelled: mainRow.cancelled,
+            payment: combinedPayment, price: mainRow.price,
+            note: [mainRow.note, subRow.note].filter(Boolean).join(' / '),
+            owedAfter: combinedOwed, frontApplied: mainRow.frontApplied
+          });
+        } else {
+          consumedIds.add(r.job.id);
+          mergedRows.push(Object.assign({workedBy:[r.worker]}, r));
+        }
+      });
+      const outstanding = mergedRows.reduce((s,r)=> s + r.owedAfter, 0);
+      mergedRows.sort((a,b)=> roundOrderRank(a.job,lookup) - roundOrderRank(b.job,lookup));
       const earnedRows = WORKERS.filter(w=>earnedByWorker[w]);
       out.innerHTML = `
         <table class="report">
@@ -3138,13 +3175,13 @@ function renderAdminReport(main){
         </table>
         <div class="section-title" style="margin-top:16px;">All jobs</div>
         <table class="report">
-          <tr><th>Worker</th><th>Address</th><th>Status</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Balance</th></tr>
-          ${allRows.length ? allRows.map(r=>`<tr><td>${escapeHtml(r.worker)}</td><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span>${cancelledBadge(r.cancelled)}</td>${chargedCell(r)}${paidCell(r)}${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="6" class="muted">No jobs yet.</td></tr>`}
+          <tr><th>Worked by</th><th>Address</th><th>Status</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Balance</th></tr>
+          ${mergedRows.length ? mergedRows.map(r=>`<tr><td>${r.workedBy.map(w=>escapeHtml(w)).join(' &amp; ')}</td><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span>${cancelledBadge(r.cancelled)}</td>${chargedCell(r)}${paidCell(r)}${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="6" class="muted">No jobs yet.</td></tr>`}
         </table>
         ${renderNewCustomerSection(allRows)}
         <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
       `;
-      out.querySelector('#rCsv').onclick = ()=> downloadReportCSVMulti(date, allRows);
+      out.querySelector('#rCsv').onclick = ()=> downloadReportCSVMulti(date, mergedRows);
       return;
     }
 
