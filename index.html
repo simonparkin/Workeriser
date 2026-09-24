@@ -3162,6 +3162,7 @@ function renderAdminReport(main){
       const outstanding = mergedRows.reduce((s,r)=> s + r.owedAfter, 0);
       mergedRows.sort((a,b)=> roundOrderRank(a.job,lookup) - roundOrderRank(b.job,lookup));
       const earnedRows = WORKERS.filter(w=>earnedByWorker[w]);
+      const totalEarned = earnedRows.reduce((s,w)=> s + earnedByWorker[w], 0);
       out.innerHTML = `
         <table class="report">
           <tr><td>Jobs done</td><td class="num">${formatJobCount(doneN)} / ${formatJobCount(totalWeighted)}</td></tr>
@@ -3174,6 +3175,7 @@ function renderAdminReport(main){
         <div class="section-title" style="margin-top:16px;">Earned by worker</div>
         <table class="report">
           ${earnedRows.length ? earnedRows.map(w=>`<tr><td>${escapeHtml(w)}</td><td class="num">${money(earnedByWorker[w])}</td></tr>`).join('') : `<tr><td class="muted">No completed jobs yet.</td></tr>`}
+          ${earnedRows.length ? `<tr><td><b>Day total</b></td><td class="num"><b>${money(totalEarned)}</b></td></tr>` : ''}
         </table>
         <div class="section-title" style="margin-top:16px;">All jobs</div>
         <table class="report">
