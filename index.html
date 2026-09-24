@@ -1304,9 +1304,10 @@ function renderNewCustomerSection(rows, useToDoLabel){
         const name = [j.title, j.firstName, j.lastName].filter(Boolean).join(' ') || '(name not given)';
         const payMethods = [j.gocardless ? 'Gocardless' : '', j.invoice ? 'Invoice' : ''].filter(Boolean).join(', ');
         const label = (useToDoLabel && r.status==='todo') ? 'To do' : statusLabel(r.status);
+        const createdByText = j.createdBy || r.worker; // fall back for older entries added before this was tracked
         return `
           <div style="padding:10px 0;border-bottom:1px solid var(--line);font-size:13px;line-height:1.6;">
-            <b>${escapeHtml(name)}</b>${r.worker ? ` <span class="muted">(${escapeHtml(r.worker)})</span>` : ''} — ${escapeHtml(j.address)}<br>
+            <b>${escapeHtml(name)}</b>${createdByText ? ` <span class="muted">(added by ${escapeHtml(createdByText)})</span>` : ''} — ${escapeHtml(j.address)}<br>
             Price: ${money(j.price)} · Frequency: ${escapeHtml(j.frequency||'—')} · Status: ${label}${r.cancelled ? ' · Cancelled' : ''}<br>
             ${j.email ? `Email: ${escapeHtml(j.email)}<br>` : ''}
             ${j.phone ? `Phone: ${escapeHtml(j.phone)}${j.needsGateText ? ' (requires txt night before)' : ''}<br>` : (j.needsGateText ? `Requires txt night before — no phone given<br>` : '')}
@@ -2421,6 +2422,7 @@ async function renderNewCustomer(){
       timeRequired: '',
       frequency,
       isNewCustomer: true,
+      createdBy: worker,
       title, firstName, lastName, email, needsGateText, gocardless, invoice
     };
     jobs.push(newJob);
@@ -3178,7 +3180,7 @@ function renderAdminReport(main){
           <tr><th>Worked by</th><th>Address</th><th>Status</th><th class="num">Charged</th><th class="num">Paid</th><th class="num">Balance</th></tr>
           ${mergedRows.length ? mergedRows.map(r=>`<tr><td>${r.workedBy.map(w=>escapeHtml(w)).join(' &amp; ')}</td><td>${escapeHtml(r.job.address)}${r.note ? `<div class="muted" style="font-size:11px;margin-top:2px;">${escapeHtml(r.note)}</div>` : ''}</td><td><span class="badge badge-${r.status}">${statusLabel(r.status)}</span>${cancelledBadge(r.cancelled)}</td>${chargedCell(r)}${paidCell(r)}${balanceCell(r)}</tr>`).join('') : `<tr><td colspan="6" class="muted">No jobs yet.</td></tr>`}
         </table>
-        ${renderNewCustomerSection(allRows)}
+        ${renderNewCustomerSection(mergedRows)}
         <button class="btn btn-ghost btn-block" id="rCsv" style="margin-top:10px;">Download CSV</button>
       `;
       out.querySelector('#rCsv').onclick = ()=> downloadReportCSVMulti(date, mergedRows);
