@@ -1787,6 +1787,7 @@ async function renderWorker(){
   // live, on both cards, rather than each card presuming it's the only thing happening.
   const addressGroups = new Map();
   sorted.forEach(job=>{
+    if(job.isSubJob || job.subJobWorker) return; // split jobs share a balance via their own dedicated logic, not this grouping
     if(!addressGroups.has(job.address)) addressGroups.set(job.address, []);
     addressGroups.get(job.address).push(job);
   });
@@ -3243,6 +3244,7 @@ async function renderAdminDayManagement(main, header){
       // same as the worker's own screen and the single-worker Day Management view
       const addressGroups = new Map();
       flat.forEach(({job})=>{
+        if(job.isSubJob || job.subJobWorker) return; // split jobs share a balance via their own dedicated logic, not this grouping
         if(!addressGroups.has(job.address)) addressGroups.set(job.address, []);
         addressGroups.get(job.address).push(job);
       });
@@ -3416,6 +3418,7 @@ async function renderAdminDayManagement(main, header){
     // real account balance — keep both cards' "today's balance" in sync, live
     const dmAddressGroups = new Map();
     sorted.forEach(job=>{
+      if(job.isSubJob || job.subJobWorker) return; // split jobs share a balance via their own dedicated logic, not this grouping
       if(!dmAddressGroups.has(job.address)) dmAddressGroups.set(job.address, []);
       dmAddressGroups.get(job.address).push(job);
     });
