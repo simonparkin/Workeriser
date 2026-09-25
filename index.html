@@ -262,6 +262,17 @@
   .reject-btn:active{background:var(--red-bg);}
   .reject-btn:disabled{opacity:.6;}
 
+  .assign-checkbox-grid{display:flex;flex-wrap:wrap;gap:8px 14px;margin-top:6px;}
+  .assign-checkbox-item{display:flex;align-items:center;gap:5px;font-size:13px;color:var(--ink);cursor:pointer;}
+  .assign-checkbox-item input{width:16px;height:16px;accent-color:var(--navy);cursor:pointer;}
+  .assign-checkbox-item input:disabled{cursor:not-allowed;}
+  .assign-role-tag{font-size:11px;font-weight:800;color:var(--amber-deep);}
+  .assign-apply-btn{
+    margin-top:8px;width:100%;background:var(--navy);color:#fff;border:none;border-radius:9px;
+    padding:8px 4px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;
+  }
+  .assign-apply-btn:disabled{opacity:.6;}
+
   .pay-row{display:flex;gap:10px;margin-top:12px;}
   .pay-field{flex:1;}
   .pay-field label{font-size:12.5px;color:var(--ink-soft);font-weight:600;display:block;margin-bottom:5px;}
@@ -865,6 +876,36 @@ async function undoSplit(senderWorker, date, mainJobId, targetWorker, wasFront){
     const subWorkerJobs = await loadJobs(mainJob.subJobWorker, date);
     const subJob = (subWorkerJobs||[]).find(j=>j.id===mainJob.subJobId);
     if(subJob) await rejectSubJobEntirely(mainJob.subJobWorker, subJob, date);
+  }
+}
+
+// Day Management's Assigned-to checkboxes call this once "Apply" is pressed. Rather
+// than trying to compute a minimal diff for every possible before/after combination,
+// this always dissolves any existing split on the job first, then rebuilds the
+// desired state from scratch (move to the new front if needed, then split to the
+// new back if one's specified) — simpler to reason about and just as safe, since
+// every step it calls is already transaction-hardened. currentJob is the job as it
+// currently sits on currentWorker's list; newAssignment is [front] or [front, back].
+async function applyFrontBackAssignment(currentWorker, currentJob, date, newAssignment){
+  const currentFront = currentWorker;
+  const currentBack = currentJob.subJobWorker || null;
+  const newFront = newAssignment[0];
+  const newBack = newAssignment[1] || null;
+
+  if(newFront === currentFront && newBack === currentBack) return; // nothing to do
+
+  if(currentBack){
+    const backJobs = await loadJobs(currentBack, date);
+    const subJob = (backJobs||[]).find(j=>j.id===currentJob.subJobId);
+    if(subJob) await rejectSubJobEntirely(currentBack, subJob, date);
+  }
+
+  if(newFront !== currentFront){
+    await moveJobsToWorker(currentFront, newFront, date, [currentJob.id]);
+  }
+
+  if(newBack){
+    await splitAndKeepFront(newFront, date, [currentJob.id], newBack);
   }
 }
 
@@ -1912,13 +1953,18 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
       <label>Job note</label>
       <textarea rows="2">${escapeHtml(p.note || '')}</textarea>
     </div>
-    ${onReassigned ? `
+    ${onReassigned ? (job.isSubJob ? `
     <div class="field" style="margin-top:10px;">
       <label>Assigned to</label>
-      <select class="reassign-select">
-        ${WORKERS.map(w=>`<option value="${escapeHtml(w)}"${w===worker?' selected':''}>${escapeHtml(w)}</option>`).join('')}
-      </select>
-    </div>` : ''}
+      <div class="muted" style="font-size:12.5px;line-height:1.4;">Back half of a split — the front is with ${escapeHtml(job.mainJobWorker)}. Edit the split from their card instead.</div>
+    </div>` : `
+    <div class="field" style="margin-top:10px;">
+      <label>Assigned to <span class="muted" style="font-weight:400;font-size:11px;">(tick up to 2 for a front/back split)</span></label>
+      <div class="assign-checkbox-grid">
+        ${WORKERS.map(w=>`<label class="assign-checkbox-item"><input type="checkbox" class="assign-checkbox" value="${escapeHtml(w)}"><span>${escapeHtml(w)}</span><span class="assign-role-tag"></span></label>`).join('')}
+      </div>
+      <button type="button" class="assign-apply-btn" style="display:none;">Apply change</button>
+    </div>`) : ''}
     ${job.isNewCustomer ? `
     <div style="display:flex;gap:8px;margin-top:8px;">
       <button type="button" class="nc-edit-btn" style="flex:1;background:transparent;border:1.5px dashed var(--blue);color:var(--blue);border-radius:9px;padding:7px 4px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Edit</button>
@@ -2043,16 +2089,59 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     };
   }
 
-  const reassignSelect = card.querySelector('.reassign-select');
-  if(reassignSelect){
-    reassignSelect.addEventListener('change', async ()=>{
-      const newWorker = reassignSelect.value;
-      if(newWorker === worker) return;
-      reassignSelect.disabled = true;
-      await moveJobsToWorker(worker, newWorker, date, [job.id]);
-      toast(`Moved to ${newWorker}`);
-      onReassigned();
+  const assignCheckboxes = card.querySelectorAll('.assign-checkbox');
+  if(assignCheckboxes.length){
+    const applyBtn = card.querySelector('.assign-apply-btn');
+    // figure out who's currently assigned, and in what role, from the job's own state
+    let checkOrder = [worker];
+    const initialRoles = {};
+    if(job.subJobWorker){
+      checkOrder = [worker, job.subJobWorker];
+      initialRoles[worker] = 'Front';
+      initialRoles[job.subJobWorker] = 'Back';
+    }
+
+    function refreshCheckboxUI(){
+      const checkedCount = checkOrder.length;
+      assignCheckboxes.forEach(cb=>{
+        const isChecked = checkOrder.includes(cb.value);
+        cb.checked = isChecked;
+        cb.disabled = !isChecked && checkedCount >= 2;
+        const tag = cb.closest('.assign-checkbox-item').querySelector('.assign-role-tag');
+        if(isChecked && checkedCount === 2){
+          const idx = checkOrder.indexOf(cb.value);
+          tag.textContent = idx === 0 ? ' (Front)' : ' (Back)';
+        } else {
+          tag.textContent = '';
+        }
+      });
+    }
+    refreshCheckboxUI();
+
+    assignCheckboxes.forEach(cb=>{
+      cb.addEventListener('change', ()=>{
+        if(cb.checked){
+          if(checkOrder.length < 2) checkOrder.push(cb.value);
+        } else {
+          if(checkOrder.length <= 1){
+            // a job always needs at least one person assigned
+            cb.checked = true;
+            return;
+          }
+          checkOrder = checkOrder.filter(w=>w!==cb.value);
+        }
+        refreshCheckboxUI();
+        applyBtn.style.display = 'block';
+      });
     });
+
+    applyBtn.onclick = async ()=>{
+      applyBtn.disabled = true;
+      applyBtn.textContent = 'Applying…';
+      await applyFrontBackAssignment(worker, job, date, checkOrder.slice());
+      toast('Assignment updated');
+      onReassigned();
+    };
   }
 
   const ncEditBtn = card.querySelector('.nc-edit-btn');
