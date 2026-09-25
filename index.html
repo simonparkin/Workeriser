@@ -886,27 +886,155 @@ async function undoSplit(senderWorker, date, mainJobId, targetWorker, wasFront){
 // new back if one's specified) — simpler to reason about and just as safe, since
 // every step it calls is already transaction-hardened. currentJob is the job as it
 // currently sits on currentWorker's list; newAssignment is [front] or [front, back].
-async function applyFrontBackAssignment(currentWorker, currentJob, date, newAssignment){
-  const currentFront = currentWorker;
-  const currentBack = currentJob.subJobWorker || null;
+async function applyFrontBackAssignment(cardWorker, cardJob, date, newAssignment){
   const newFront = newAssignment[0];
   const newBack = newAssignment[1] || null;
 
-  if(newFront === currentFront && newBack === currentBack) return; // nothing to do
+  if(cardJob.isSubJob){
+    // viewing from the back card. Its own existence is certain (we're looking at
+    // it), but the main job it claims to link to might not be — that's exactly the
+    // kind of error this tool exists to correct. So check first, and never delete
+    // this sub-card on the assumption a valid main is waiting on the other end.
+    const currentFront = cardJob.mainJobWorker;
+    const currentBack = cardWorker;
+    if(newFront === currentFront && newBack === currentBack) return;
 
-  if(currentBack){
+    const mainJobsList = await loadJobs(cardJob.mainJobWorker, date);
+    const mainJob = (mainJobsList||[]).find(j=>j.id===cardJob.mainJobId && j.subJobId===cardJob.id);
+
+    if(mainJob){
+      // link confirmed valid both ways — safe to dissolve and rebuild as normal
+      await rejectSubJobEntirely(cardWorker, cardJob, date);
+      if(newFront !== currentFront){
+        await moveJobsToWorker(currentFront, newFront, date, [mainJob.id]);
+      }
+      if(newBack){
+        await splitAndKeepFront(newFront, date, [mainJob.id], newBack);
+      }
+    } else {
+      // the link is stale or broken — this sub-card is the only confirmed-real copy
+      // of the job, so convert it in place rather than risk losing it entirely
+      if(!db){ toast('Not connected to the database'); return; }
+      const backJobsRef = doc(db,'workeriser',`jobs_${cardWorker}_${date}`);
+      try{
+        await runTransaction(db, async (tx)=>{
+          const snap = await tx.get(backJobsRef);
+          const jobs = snap.exists() ? (snap.data().value || []) : [];
+          const updated = jobs.map(j=> j.id===cardJob.id ? (({isSubJob, mainJobWorker, mainJobId, ...rest})=>rest)(j) : j);
+          tx.set(backJobsRef, { value: updated, updatedAt: Date.now() });
+        });
+      }catch(err){
+        console.error('applyFrontBackAssignment (stale link recovery) failed', err);
+        toast('Connection problem — please try again');
+        return;
+      }
+      if(newFront !== cardWorker){
+        await moveJobsToWorker(cardWorker, newFront, date, [cardJob.id]);
+      }
+      if(newBack){
+        await splitAndKeepFront(newFront, date, [cardJob.id], newBack);
+      }
+    }
+    return;
+  }
+
+  // viewing from the front — a normal job, or a main job with a linked sub. cardJob
+  // is confirmed to exist here (we're looking at it), so this direction has no
+  // equivalent risk: the job we might move is the one right in front of us.
+  const currentFront = cardWorker;
+  const currentBack = cardJob.subJobWorker || null;
+  if(newFront === currentFront && newBack === currentBack) return;
+
+  if(currentBack && cardJob.subJobId){
     const backJobs = await loadJobs(currentBack, date);
-    const subJob = (backJobs||[]).find(j=>j.id===currentJob.subJobId);
+    const subJob = (backJobs||[]).find(j=>j.id===cardJob.subJobId);
     if(subJob) await rejectSubJobEntirely(currentBack, subJob, date);
   }
-
   if(newFront !== currentFront){
-    await moveJobsToWorker(currentFront, newFront, date, [currentJob.id]);
+    await moveJobsToWorker(currentFront, newFront, date, [cardJob.id]);
+  }
+  if(newBack){
+    await splitAndKeepFront(newFront, date, [cardJob.id], newBack);
+  }
+}
+
+// scans every worker's list for a split half whose counterpart is missing (e.g. from
+// an old data problem, or a job deleted from one side without the link being cleared
+// on the other) and recreates the missing half in the worker it's supposed to belong
+// to, using the surviving half's own data as the template — landing it as a normal,
+// reassignable job there, ready to correct with the Assigned-to checkboxes if the
+// worker it lands on isn't right. Returns how many it fixed, so the caller can let
+// the person know something needed healing rather than fixing it invisibly.
+async function healBrokenSplitLinks(date){
+  const results = await Promise.all(WORKERS.map(async w=> ({ w, jobs: (await loadJobs(w, date)) || [] })));
+  const jobsByWorker = new Map();
+  results.forEach(({w, jobs})=>{
+    const m = new Map();
+    jobs.forEach(j=>m.set(j.id, j));
+    jobsByWorker.set(w, m);
+  });
+
+  let healedCount = 0;
+
+  for(const {w, jobs} of results){
+    for(const job of jobs){
+      if(job.isSubJob && job.mainJobWorker && job.mainJobId){
+        const mainJob = jobsByWorker.get(job.mainJobWorker)?.get(job.mainJobId);
+        if(mainJob) continue; // link is valid, nothing to heal
+
+        const targetWorker = job.mainJobWorker;
+        const newMainId = 'healed_' + job.mainJobId + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7);
+        const newMain = (({isSubJob, mainJobWorker, mainJobId, ...rest})=>rest)(job);
+        newMain.id = newMainId;
+        newMain.subJobWorker = w;
+        newMain.subJobId = job.id;
+
+        const targetJobsList = jobsByWorker.get(targetWorker) ? Array.from(jobsByWorker.get(targetWorker).values()) : [];
+        targetJobsList.push(newMain);
+        await saveJobs(targetWorker, date, targetJobsList);
+
+        const ownJobsList = Array.from(jobsByWorker.get(w).values());
+        const updatedOwn = ownJobsList.map(j=> j.id===job.id ? Object.assign({}, j, { mainJobId: newMainId }) : j);
+        await saveJobs(w, date, updatedOwn);
+
+        if(!jobsByWorker.has(targetWorker)) jobsByWorker.set(targetWorker, new Map());
+        jobsByWorker.get(targetWorker).set(newMainId, newMain);
+        jobsByWorker.get(w).set(job.id, Object.assign({}, job, { mainJobId: newMainId }));
+
+        healedCount++;
+      } else if(job.subJobWorker && job.subJobId){
+        const subJob = jobsByWorker.get(job.subJobWorker)?.get(job.subJobId);
+        if(subJob) continue; // link is valid, nothing to heal
+
+        const targetWorker = job.subJobWorker;
+        const newSubId = 'healed_sub_' + job.id + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7);
+        const newSub = Object.assign({}, job, {
+          id: newSubId,
+          isSubJob: true,
+          mainJobWorker: w,
+          mainJobId: job.id
+        });
+        delete newSub.subJobWorker;
+        delete newSub.subJobId;
+
+        const targetJobsList = jobsByWorker.get(targetWorker) ? Array.from(jobsByWorker.get(targetWorker).values()) : [];
+        targetJobsList.push(newSub);
+        await saveJobs(targetWorker, date, targetJobsList);
+
+        const ownJobsList = Array.from(jobsByWorker.get(w).values());
+        const updatedOwn = ownJobsList.map(j=> j.id===job.id ? Object.assign({}, j, { subJobId: newSubId }) : j);
+        await saveJobs(w, date, updatedOwn);
+
+        if(!jobsByWorker.has(targetWorker)) jobsByWorker.set(targetWorker, new Map());
+        jobsByWorker.get(targetWorker).set(newSubId, newSub);
+        jobsByWorker.get(w).set(job.id, Object.assign({}, job, { subJobId: newSubId }));
+
+        healedCount++;
+      }
+    }
   }
 
-  if(newBack){
-    await splitAndKeepFront(newFront, date, [currentJob.id], newBack);
-  }
+  return healedCount;
 }
 
 /* ================= CSV PARSING ================= */
@@ -1953,18 +2081,14 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
       <label>Job note</label>
       <textarea rows="2">${escapeHtml(p.note || '')}</textarea>
     </div>
-    ${onReassigned ? (job.isSubJob ? `
-    <div class="field" style="margin-top:10px;">
-      <label>Assigned to</label>
-      <div class="muted" style="font-size:12.5px;line-height:1.4;">Back half of a split — the front is with ${escapeHtml(job.mainJobWorker)}. Edit the split from their card instead.</div>
-    </div>` : `
+    ${onReassigned ? `
     <div class="field" style="margin-top:10px;">
       <label>Assigned to <span class="muted" style="font-weight:400;font-size:11px;">(tick up to 2 for a front/back split)</span></label>
       <div class="assign-checkbox-grid">
         ${WORKERS.map(w=>`<label class="assign-checkbox-item"><input type="checkbox" class="assign-checkbox" value="${escapeHtml(w)}"><span>${escapeHtml(w)}</span><span class="assign-role-tag"></span></label>`).join('')}
       </div>
       <button type="button" class="assign-apply-btn" style="display:none;">Apply change</button>
-    </div>`) : ''}
+    </div>` : ''}
     ${job.isNewCustomer ? `
     <div style="display:flex;gap:8px;margin-top:8px;">
       <button type="button" class="nc-edit-btn" style="flex:1;background:transparent;border:1.5px dashed var(--blue);color:var(--blue);border-radius:9px;padding:7px 4px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;">Edit</button>
@@ -2092,13 +2216,13 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
   const assignCheckboxes = card.querySelectorAll('.assign-checkbox');
   if(assignCheckboxes.length){
     const applyBtn = card.querySelector('.assign-apply-btn');
-    // figure out who's currently assigned, and in what role, from the job's own state
+    // figure out who's currently assigned, front first then back, from the job's own
+    // state — works whether we're looking at the front card or the back card
     let checkOrder = [worker];
-    const initialRoles = {};
-    if(job.subJobWorker){
+    if(job.isSubJob && job.mainJobWorker){
+      checkOrder = [job.mainJobWorker, worker];
+    } else if(job.subJobWorker){
       checkOrder = [worker, job.subJobWorker];
-      initialRoles[worker] = 'Front';
-      initialRoles[job.subJobWorker] = 'Back';
     }
 
     function refreshCheckboxUI(){
@@ -2255,7 +2379,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
 // the shared balance, and a single Done button. No Skip/Cancel here — if the main
 // card ends up skipped or cancelled, this card gets rejected back automatically,
 // since the main card already reports that outcome for the whole job.
-function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats){
+function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats,onReassigned){
   const p = prog[job.id] || { status:'todo', payment:'', note:'' };
   const card = document.createElement('div');
   card.className = `card job-card sub-job-card status-${p.status}`;
@@ -2303,6 +2427,14 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats){
       <label>Job note</label>
       <textarea rows="2">${escapeHtml(p.note || '')}</textarea>
     </div>
+    ${onReassigned ? `
+    <div class="field" style="margin-top:10px;">
+      <label>Assigned to <span class="muted" style="font-weight:400;font-size:11px;">(tick up to 2 for a front/back split)</span></label>
+      <div class="assign-checkbox-grid">
+        ${WORKERS.map(w=>`<label class="assign-checkbox-item"><input type="checkbox" class="assign-checkbox" value="${escapeHtml(w)}"><span>${escapeHtml(w)}</span><span class="assign-role-tag"></span></label>`).join('')}
+      </div>
+      <button type="button" class="assign-apply-btn" style="display:none;">Apply change</button>
+    </div>` : ''}
     <button type="button" class="reject-btn">Reject (cancel this split)</button>
   `;
 
@@ -2394,6 +2526,53 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats){
     scheduleReflow(job.id, worker, date);
   });
 
+  const assignCheckboxes = card.querySelectorAll('.assign-checkbox');
+  if(assignCheckboxes.length){
+    const applyBtn = card.querySelector('.assign-apply-btn');
+    let checkOrder = [job.mainJobWorker, worker]; // front first, then this back card's own worker
+
+    function refreshCheckboxUI(){
+      const checkedCount = checkOrder.length;
+      assignCheckboxes.forEach(cb=>{
+        const isChecked = checkOrder.includes(cb.value);
+        cb.checked = isChecked;
+        cb.disabled = !isChecked && checkedCount >= 2;
+        const tag = cb.closest('.assign-checkbox-item').querySelector('.assign-role-tag');
+        if(isChecked && checkedCount === 2){
+          const idx = checkOrder.indexOf(cb.value);
+          tag.textContent = idx === 0 ? ' (Front)' : ' (Back)';
+        } else {
+          tag.textContent = '';
+        }
+      });
+    }
+    refreshCheckboxUI();
+
+    assignCheckboxes.forEach(cb=>{
+      cb.addEventListener('change', ()=>{
+        if(cb.checked){
+          if(checkOrder.length < 2) checkOrder.push(cb.value);
+        } else {
+          if(checkOrder.length <= 1){
+            cb.checked = true;
+            return;
+          }
+          checkOrder = checkOrder.filter(w=>w!==cb.value);
+        }
+        refreshCheckboxUI();
+        applyBtn.style.display = 'block';
+      });
+    });
+
+    applyBtn.onclick = async ()=>{
+      applyBtn.disabled = true;
+      applyBtn.textContent = 'Applying…';
+      await applyFrontBackAssignment(worker, job, date, checkOrder.slice());
+      toast('Assignment updated');
+      onReassigned();
+    };
+  }
+
   card.querySelector('.reject-btn').onclick = async ()=>{
     const btn = card.querySelector('.reject-btn');
     if(!confirm(`Reject this split? This removes the "back" card completely — ${escapeHtml(job.address)} will just be a normal job for whoever has the front.`)) return;
@@ -2401,7 +2580,7 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats){
     btn.textContent = 'Removing…';
     await rejectSubJobEntirely(worker, job, date);
     toast('Split cancelled — back card removed');
-    render();
+    if(onReassigned) onReassigned(); else render();
   };
 
   return card;
@@ -2980,6 +3159,11 @@ async function renderAdminDayManagement(main, header){
     out.innerHTML = '<p class="muted">Loading…</p>';
     dmReorderBar.innerHTML = '';
 
+    const healedCount = await healBrokenSplitLinks(date);
+    if(healedCount){
+      toast(`Fixed ${healedCount} split${healedCount===1?'':'s'} with a missing front/back — recreated and ready to reassign if needed`);
+    }
+
     if(worker === 'ALL'){
       const results = await Promise.all(WORKERS.map(async w=>{
         const jobs = await loadJobs(w,date);
@@ -3008,6 +3192,17 @@ async function renderAdminDayManagement(main, header){
       const cardMap = new Map();
       const balanceLinkHandlers = new Map();
       const customFrontPrices = await loadCustomFrontPrices();
+
+      // build lookup maps from data we've already loaded, so a sub-card's main job
+      // (which might belong to a different worker) can be found with no extra fetch
+      const jobsByWorker = new Map();
+      const progByWorker = new Map();
+      flat.forEach(({worker:w, job, prog})=>{
+        if(!jobsByWorker.has(w)) jobsByWorker.set(w, new Map());
+        jobsByWorker.get(w).set(job.id, job);
+        progByWorker.set(w, prog);
+      });
+
       flat.forEach(({worker:w, job, prog})=>{
         if(job.round && job.round !== lastRound){
           const rl = document.createElement('div');
@@ -3016,10 +3211,17 @@ async function renderAdminDayManagement(main, header){
           listWrap.appendChild(rl);
           lastRound = job.round;
         }
-        const cardEl = renderJobCard(w, date, job, prog, null, true, loadAndRender, null, ()=>{
-          const fn = balanceLinkHandlers.get(job.id);
-          if(fn) fn();
-        },customFrontPrices);
+        let cardEl;
+        const mainJob = (job.isSubJob && job.mainJobWorker && job.mainJobId) ? jobsByWorker.get(job.mainJobWorker)?.get(job.mainJobId) : null;
+        if(mainJob){
+          // confirmed-valid link — show it exactly as the worker's own screen would
+          cardEl = renderSubJobCard(w, date, job, prog, mainJob, progByWorker.get(job.mainJobWorker) || {}, null, loadAndRender);
+        } else {
+          cardEl = renderJobCard(w, date, job, prog, null, true, loadAndRender, null, ()=>{
+            const fn = balanceLinkHandlers.get(job.id);
+            if(fn) fn();
+          },customFrontPrices);
+        }
         listWrap.appendChild(cardEl);
         cardMap.set(job.id, cardEl);
       });
@@ -3040,7 +3242,8 @@ async function renderAdminDayManagement(main, header){
           const debt = -groupJobs[0].balance;
           let chargeSum = 0, paymentSum = 0, allSkipped = true;
           groupCards.forEach(c=>{
-            const isSkipped = c.querySelector('[data-action="skipped"]').classList.contains('active-skipped');
+            const skippedBtn = c.querySelector('[data-action="skipped"]');
+            const isSkipped = skippedBtn ? skippedBtn.classList.contains('active-skipped') : false;
             if(!isSkipped) allSkipped = false;
             const price = parseFloat(c.querySelector('.price-input').value) || 0;
             const payment = parseFloat(c.querySelector('.pay-input').value) || 0;
@@ -3139,6 +3342,17 @@ async function renderAdminDayManagement(main, header){
     const dmCardMap = new Map();
     const customFrontPrices = await loadCustomFrontPrices();
 
+    // pre-fetch any sub-cards' main job data (which might belong to a different
+    // worker) so each one can be shown exactly as the worker's own screen would
+    const linkedMainMap = new Map();
+    await Promise.all(sorted.map(async j=>{
+      if(j.isSubJob && j.mainJobWorker && j.mainJobId){
+        const [mJobs, mProg] = await Promise.all([loadJobs(j.mainJobWorker, date), loadProgress(j.mainJobWorker, date)]);
+        const mainJob = (mJobs||[]).find(mj=>mj.id===j.mainJobId);
+        if(mainJob) linkedMainMap.set(j.id, { mainJob, mainProg: mProg||{} });
+      }
+    }));
+
     sorted.forEach((job,idx)=>{
       if(job.round && job.round !== lastRound){
         const rl = document.createElement('div');
@@ -3157,10 +3371,13 @@ async function renderAdminDayManagement(main, header){
         <button type="button" class="dm-down-btn" ${idx===sorted.length-1?'disabled':''} style="width:32px;height:28px;border:1.5px solid var(--line);background:#fff;border-radius:7px;color:var(--navy);font-size:13px;cursor:pointer;">▼</button>
       `;
       // isSuper=true hides the Reject button, which is meant for field workers, not admin edits
-      const cardEl = renderJobCard(worker, date, job, prog, null, true, loadAndRender, null, ()=>{
-        const fn = dmBalanceLinkHandlers.get(job.id);
-        if(fn) fn();
-      },customFrontPrices);
+      const linked = linkedMainMap.get(job.id);
+      const cardEl = linked
+        ? renderSubJobCard(worker, date, job, prog, linked.mainJob, linked.mainProg, null, loadAndRender)
+        : renderJobCard(worker, date, job, prog, null, true, loadAndRender, null, ()=>{
+            const fn = dmBalanceLinkHandlers.get(job.id);
+            if(fn) fn();
+          },customFrontPrices);
       cardEl.style.flex = '1';
       cardEl.style.marginBottom = '0';
       row.appendChild(controls);
@@ -3198,7 +3415,8 @@ async function renderAdminDayManagement(main, header){
         const debt = -groupJobs[0].balance;
         let chargeSum = 0, paymentSum = 0, allSkipped = true;
         groupCards.forEach(c=>{
-          const isSkipped = c.querySelector('[data-action="skipped"]').classList.contains('active-skipped');
+          const skippedBtn = c.querySelector('[data-action="skipped"]');
+          const isSkipped = skippedBtn ? skippedBtn.classList.contains('active-skipped') : false;
           if(!isSkipped) allSkipped = false;
           const price = parseFloat(c.querySelector('.price-input').value) || 0;
           const payment = parseFloat(c.querySelector('.pay-input').value) || 0;
