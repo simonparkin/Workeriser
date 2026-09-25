@@ -2217,13 +2217,20 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
   if(assignCheckboxes.length){
     const applyBtn = card.querySelector('.assign-apply-btn');
     // figure out who's currently assigned, front first then back, from the job's own
-    // state — works whether we're looking at the front card or the back card
+    // state — works whether we're looking at the front card or the back card.
+    // de-duplicated defensively: if a job's linked worker ever happens to equal its
+    // own worker (stale data, a mid-correction state), a duplicate entry here would
+    // let a single uncheck remove both copies at once and drop straight to zero.
+    // also filtered to real workers only — an orphaned job's "current" location
+    // (e.g. the recovery view) isn't a selectable checkbox and shouldn't count as
+    // a phantom checked entry, which could otherwise force an unwanted split.
     let checkOrder = [worker];
     if(job.isSubJob && job.mainJobWorker){
-      checkOrder = [job.mainJobWorker, worker];
+      checkOrder = [...new Set([job.mainJobWorker, worker])];
     } else if(job.subJobWorker){
-      checkOrder = [worker, job.subJobWorker];
+      checkOrder = [...new Set([worker, job.subJobWorker])];
     }
+    checkOrder = checkOrder.filter(w => WORKERS.includes(w));
 
     function refreshCheckboxUI(){
       const checkedCount = checkOrder.length;
@@ -2245,14 +2252,18 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     assignCheckboxes.forEach(cb=>{
       cb.addEventListener('change', ()=>{
         if(cb.checked){
-          if(checkOrder.length < 2) checkOrder.push(cb.value);
+          if(checkOrder.length < 2 && !checkOrder.includes(cb.value)) checkOrder.push(cb.value);
         } else {
-          if(checkOrder.length <= 1){
+          // check the RESULT of removing this one, not the length beforehand —
+          // if checkOrder ever had a duplicate, removing "one" could otherwise
+          // remove both copies at once and slip past a before-the-fact check
+          const wouldRemain = checkOrder.filter(w=>w!==cb.value);
+          if(wouldRemain.length === 0){
             // a job always needs at least one person assigned
             cb.checked = true;
             return;
           }
-          checkOrder = checkOrder.filter(w=>w!==cb.value);
+          checkOrder = wouldRemain;
         }
         refreshCheckboxUI();
         applyBtn.style.display = 'block';
@@ -2529,7 +2540,7 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats,onR
   const assignCheckboxes = card.querySelectorAll('.assign-checkbox');
   if(assignCheckboxes.length){
     const applyBtn = card.querySelector('.assign-apply-btn');
-    let checkOrder = [job.mainJobWorker, worker]; // front first, then this back card's own worker
+    let checkOrder = [...new Set([job.mainJobWorker, worker])]; // front first, then this back card's own worker
 
     function refreshCheckboxUI(){
       const checkedCount = checkOrder.length;
@@ -2551,13 +2562,14 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats,onR
     assignCheckboxes.forEach(cb=>{
       cb.addEventListener('change', ()=>{
         if(cb.checked){
-          if(checkOrder.length < 2) checkOrder.push(cb.value);
+          if(checkOrder.length < 2 && !checkOrder.includes(cb.value)) checkOrder.push(cb.value);
         } else {
-          if(checkOrder.length <= 1){
+          const wouldRemain = checkOrder.filter(w=>w!==cb.value);
+          if(wouldRemain.length === 0){
             cb.checked = true;
             return;
           }
-          checkOrder = checkOrder.filter(w=>w!==cb.value);
+          checkOrder = wouldRemain;
         }
         refreshCheckboxUI();
         applyBtn.style.display = 'block';
@@ -3132,7 +3144,7 @@ async function renderAdminUpload(main){
 async function renderAdminDayManagement(main, header){
   const card = document.createElement('div');
   card.className = 'card pad';
-  const options = `<option value="ALL">All workers</option>` + WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
+  const options = `<option value="ALL">All workers</option>` + WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('') + `<option value="undefined">⚠ Recover orphaned jobs</option>`;
   card.innerHTML = `
     <div class="section-title">Day management</div>
     <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">View and correct any worker's list for any date — add notes, adjust prices, fix statuses. Works for jobs still to come or already completed.</p>
