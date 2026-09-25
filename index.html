@@ -377,7 +377,7 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, doc, getDoc, setDoc, runTransaction } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 /* =========================================================================
    FIREBASE SETUP — fill this in so every phone shares the same data.
@@ -554,75 +554,91 @@ async function loadForReport(worker,date){
 // moves a set of jobs (by id) from one worker's round to another's, for the same date,
 // carrying over any progress (payment/price/note) already recorded against them
 async function moveJobsToWorker(fromWorker, toWorker, date, jobIds){
-  const [fromJobs, fromProg, toJobsRaw, toProgRaw, lookup] = await Promise.all([
-    loadJobs(fromWorker,date),
-    loadProgress(fromWorker,date),
-    loadJobs(toWorker,date),
-    loadProgress(toWorker,date),
-    loadCoordLookup()
-  ]);
+  if(!db){ toast('Not connected to the database'); return; }
+  const lookup = await loadCoordLookup();
   const idSet = new Set(jobIds);
-  const source = fromJobs || [];
-  const moving = source.filter(j=>idSet.has(j.id));
-  const remaining = source.filter(j=>!idSet.has(j.id));
-  const toJobs = toJobsRaw || [];
-  const toProg = toProgRaw || {};
-  moving.forEach(j=>{
-    j.lastAssignedBy = fromWorker;
-    toJobs.push(j);
-    if(fromProg[j.id]){
-      toProg[j.id] = fromProg[j.id];
-      delete fromProg[j.id];
-    }
-  });
-  // reinsert into round order where possible (falls back to append-at-end if no round order is on file)
   const roundOrder = lookup.roundOrder || [];
   function roundRank(roundName){
     const idx = roundOrder.indexOf(roundName);
     return idx === -1 ? Infinity : idx;
   }
-  toJobs.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
-  toJobs.forEach((j,idx)=>{ j.order = idx; });
-  await Promise.all([
-    saveJobs(fromWorker, date, remaining),
-    saveJobs(toWorker, date, toJobs),
-    saveProgress(fromWorker, date, fromProg),
-    saveProgress(toWorker, date, toProg)
-  ]);
 
-  // if any of the moved jobs are "back" sub-cards, update the main job's pointer to
-  // follow them to their new worker, so the link never goes stale as it's passed along
-  const movedSubJobs = moving.filter(j=>j.isSubJob && j.mainJobWorker && j.mainJobId);
-  if(movedSubJobs.length){
-    const byMainWorker = {};
-    movedSubJobs.forEach(j=>{
-      (byMainWorker[j.mainJobWorker] = byMainWorker[j.mainJobWorker] || []).push(j.mainJobId);
+  const fromJobsRef = doc(db,'workeriser',`jobs_${fromWorker}_${date}`);
+  const toJobsRef = doc(db,'workeriser',`jobs_${toWorker}_${date}`);
+  const fromProgRef = doc(db,'workeriser',`progress_${fromWorker}_${date}`);
+  const toProgRef = doc(db,'workeriser',`progress_${toWorker}_${date}`);
+
+  let moving = [];
+  try{
+    await runTransaction(db, async (tx)=>{
+      const [fromSnap, toSnap, fromProgSnap, toProgSnap] = await Promise.all([
+        tx.get(fromJobsRef), tx.get(toJobsRef), tx.get(fromProgRef), tx.get(toProgRef)
+      ]);
+      const source = fromSnap.exists() ? (fromSnap.data().value || []) : [];
+      const toJobs = toSnap.exists() ? (toSnap.data().value || []) : [];
+      const fromProg = fromProgSnap.exists() ? (fromProgSnap.data().value || {}) : {};
+      const toProg = toProgSnap.exists() ? (toProgSnap.data().value || {}) : {};
+
+      moving = source.filter(j=>idSet.has(j.id));
+      const remaining = source.filter(j=>!idSet.has(j.id));
+
+      moving.forEach(j=>{
+        j.lastAssignedBy = fromWorker;
+        toJobs.push(j);
+        if(fromProg[j.id]){
+          toProg[j.id] = fromProg[j.id];
+          delete fromProg[j.id];
+        }
+      });
+
+      toJobs.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
+      toJobs.forEach((j,idx)=>{ j.order = idx; });
+
+      tx.set(fromJobsRef, { value: remaining, updatedAt: Date.now() });
+      tx.set(toJobsRef, { value: toJobs, updatedAt: Date.now() });
+      tx.set(fromProgRef, { value: fromProg, updatedAt: Date.now() });
+      tx.set(toProgRef, { value: toProg, updatedAt: Date.now() });
     });
-    await Promise.all(Object.entries(byMainWorker).map(async ([mainWorker, mainJobIds])=>{
-      const idSet2 = new Set(mainJobIds);
-      const mainJobs = await loadJobs(mainWorker, date);
-      if(!mainJobs) return;
-      const updated = mainJobs.map(mj=> idSet2.has(mj.id) ? Object.assign({}, mj, { subJobWorker: toWorker }) : mj);
-      await saveJobs(mainWorker, date, updated);
-    }));
+  }catch(err){
+    console.error('moveJobsToWorker transaction failed', err);
+    toast('Connection problem moving the job — please try again');
+    return;
   }
 
-  // the reverse case: if any of the moved jobs are "front" main jobs with a linked
-  // sub-card, follow through and update the sub-job's pointer to match — this is
-  // what lets Undo correctly reverse a front split by moving the main job back
+  const meta = await getMeta();
+  [fromWorker, toWorker].forEach(w=>{
+    meta.lastDate[w] = date;
+    const key = `${w}|${date}`;
+    if(!meta.rounds.includes(key)) meta.rounds.push(key);
+  });
+  await saveMeta(meta);
+
+  const movedSubJobs = moving.filter(j=>j.isSubJob && j.mainJobWorker && j.mainJobId);
+  for(const j of movedSubJobs){
+    const mainRef = doc(db,'workeriser',`jobs_${j.mainJobWorker}_${date}`);
+    try{
+      await runTransaction(db, async (tx)=>{
+        const snap = await tx.get(mainRef);
+        if(!snap.exists()) return;
+        const jobs = snap.data().value || [];
+        const updated = jobs.map(mj=> mj.id===j.mainJobId ? Object.assign({}, mj, { subJobWorker: toWorker }) : mj);
+        tx.set(mainRef, { value: updated, updatedAt: Date.now() });
+      });
+    }catch(err){ console.error('sub-job pointer update failed', err); }
+  }
+
   const movedMainJobs = moving.filter(j=>j.subJobWorker && j.subJobId);
-  if(movedMainJobs.length){
-    const bySubWorker = {};
-    movedMainJobs.forEach(j=>{
-      (bySubWorker[j.subJobWorker] = bySubWorker[j.subJobWorker] || []).push(j.subJobId);
-    });
-    await Promise.all(Object.entries(bySubWorker).map(async ([subWorker, subJobIds])=>{
-      const idSet3 = new Set(subJobIds);
-      const subJobsList = await loadJobs(subWorker, date);
-      if(!subJobsList) return;
-      const updated = subJobsList.map(sj=> idSet3.has(sj.id) ? Object.assign({}, sj, { mainJobWorker: toWorker }) : sj);
-      await saveJobs(subWorker, date, updated);
-    }));
+  for(const j of movedMainJobs){
+    const subRef = doc(db,'workeriser',`jobs_${j.subJobWorker}_${date}`);
+    try{
+      await runTransaction(db, async (tx)=>{
+        const snap = await tx.get(subRef);
+        if(!snap.exists()) return;
+        const jobs = snap.data().value || [];
+        const updated = jobs.map(sj=> sj.id===j.subJobId ? Object.assign({}, sj, { mainJobWorker: toWorker }) : sj);
+        tx.set(subRef, { value: updated, updatedAt: Date.now() });
+      });
+    }catch(err){ console.error('main-job pointer update failed', err); }
   }
 }
 
@@ -631,62 +647,73 @@ async function moveJobsToWorker(fromWorker, toWorker, date, jobIds){
 // list — ready to be selected and sent on to whoever does the back, or just kept
 // by the sender if they're doing that part themselves
 async function splitAndSendJobs(fromWorker, date, jobIds, targetWorker){
-  const [fromJobs, fromProg, targetJobsRaw, targetProgRaw, lookup] = await Promise.all([
-    loadJobs(fromWorker,date),
-    loadProgress(fromWorker,date),
-    loadJobs(targetWorker,date),
-    loadProgress(targetWorker,date),
-    loadCoordLookup()
-  ]);
+  if(!db){ toast('Not connected to the database'); return; }
+  const lookup = await loadCoordLookup();
   const idSet = new Set(jobIds);
-  const source = fromJobs || [];
-  const splitting = source.filter(j=>idSet.has(j.id));
-  const remaining = source.filter(j=>!idSet.has(j.id));
-  const targetJobs = targetJobsRaw || [];
-  const targetProg = targetProgRaw || {};
-  const newSubJobs = [];
-
-  splitting.forEach(mainJob=>{
-    const subJob = Object.assign({}, mainJob, {
-      id: 'sub_' + mainJob.id + '_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
-      isSubJob: true,
-      mainJobWorker: targetWorker,
-      mainJobId: mainJob.id,
-      lastAssignedBy: fromWorker
-    });
-    delete subJob.subJobWorker;
-    delete subJob.subJobId;
-    newSubJobs.push(subJob);
-
-    const updatedMain = Object.assign({}, mainJob, {
-      subJobWorker: fromWorker,
-      subJobId: subJob.id,
-      lastAssignedBy: fromWorker
-    });
-    targetJobs.push(updatedMain);
-    if(fromProg[mainJob.id]){
-      targetProg[mainJob.id] = fromProg[mainJob.id];
-      delete fromProg[mainJob.id];
-    }
-  });
-
-  const senderList = remaining.concat(newSubJobs);
   const roundOrder = lookup.roundOrder || [];
   function roundRank(roundName){
     const idx = roundOrder.indexOf(roundName);
     return idx === -1 ? Infinity : idx;
   }
-  senderList.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
-  senderList.forEach((j,idx)=>{ j.order = idx; });
-  targetJobs.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
-  targetJobs.forEach((j,idx)=>{ j.order = idx; });
 
-  await Promise.all([
-    saveJobs(fromWorker, date, senderList),
-    saveJobs(targetWorker, date, targetJobs),
-    saveProgress(fromWorker, date, fromProg),
-    saveProgress(targetWorker, date, targetProg)
-  ]);
+  const fromJobsRef = doc(db,'workeriser',`jobs_${fromWorker}_${date}`);
+  const targetJobsRef = doc(db,'workeriser',`jobs_${targetWorker}_${date}`);
+  const fromProgRef = doc(db,'workeriser',`progress_${fromWorker}_${date}`);
+  const targetProgRef = doc(db,'workeriser',`progress_${targetWorker}_${date}`);
+
+  try{
+    await runTransaction(db, async (tx)=>{
+      const [fromSnap, targetSnap, fromProgSnap, targetProgSnap] = await Promise.all([
+        tx.get(fromJobsRef), tx.get(targetJobsRef), tx.get(fromProgRef), tx.get(targetProgRef)
+      ]);
+      const source = fromSnap.exists() ? (fromSnap.data().value || []) : [];
+      const targetJobs = targetSnap.exists() ? (targetSnap.data().value || []) : [];
+      const fromProg = fromProgSnap.exists() ? (fromProgSnap.data().value || {}) : {};
+      const targetProg = targetProgSnap.exists() ? (targetProgSnap.data().value || {}) : {};
+
+      const splitting = source.filter(j=>idSet.has(j.id));
+      const remaining = source.filter(j=>!idSet.has(j.id));
+      const newSubJobs = [];
+
+      splitting.forEach(mainJob=>{
+        const subJob = Object.assign({}, mainJob, {
+          id: 'sub_' + mainJob.id + '_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
+          isSubJob: true,
+          mainJobWorker: targetWorker,
+          mainJobId: mainJob.id,
+          lastAssignedBy: fromWorker
+        });
+        delete subJob.subJobWorker;
+        delete subJob.subJobId;
+        newSubJobs.push(subJob);
+
+        const updatedMain = Object.assign({}, mainJob, {
+          subJobWorker: fromWorker,
+          subJobId: subJob.id,
+          lastAssignedBy: fromWorker
+        });
+        targetJobs.push(updatedMain);
+        if(fromProg[mainJob.id]){
+          targetProg[mainJob.id] = fromProg[mainJob.id];
+          delete fromProg[mainJob.id];
+        }
+      });
+
+      const senderList = remaining.concat(newSubJobs);
+      senderList.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
+      senderList.forEach((j,idx)=>{ j.order = idx; });
+      targetJobs.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
+      targetJobs.forEach((j,idx)=>{ j.order = idx; });
+
+      tx.set(fromJobsRef, { value: senderList, updatedAt: Date.now() });
+      tx.set(targetJobsRef, { value: targetJobs, updatedAt: Date.now() });
+      tx.set(fromProgRef, { value: fromProg, updatedAt: Date.now() });
+      tx.set(targetProgRef, { value: targetProg, updatedAt: Date.now() });
+    });
+  }catch(err){
+    console.error('splitAndSendJobs transaction failed', err);
+    toast('Connection problem splitting the job — please try again');
+  }
 }
 
 // the mirror of splitAndSendJobs — used when the sender wants to do the FRONT
@@ -694,44 +721,51 @@ async function splitAndSendJobs(fromWorker, date, jobIds, targetWorker){
 // the whole job away and back again. The main job stays exactly where it is; a
 // new "back" sub-card is created and sent straight to the chosen worker.
 async function splitAndKeepFront(fromWorker, date, jobIds, targetWorker){
-  const [fromJobs, targetJobsRaw, lookup] = await Promise.all([
-    loadJobs(fromWorker,date),
-    loadJobs(targetWorker,date),
-    loadCoordLookup()
-  ]);
+  if(!db){ toast('Not connected to the database'); return; }
+  const lookup = await loadCoordLookup();
   const idSet = new Set(jobIds);
-  const source = fromJobs || [];
-  const targetJobs = targetJobsRaw || [];
-  const newSubJobs = [];
-
-  const updatedSource = source.map(mainJob=>{
-    if(!idSet.has(mainJob.id)) return mainJob;
-    const subJob = Object.assign({}, mainJob, {
-      id: 'sub_' + mainJob.id + '_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
-      isSubJob: true,
-      mainJobWorker: fromWorker,
-      mainJobId: mainJob.id,
-      lastAssignedBy: fromWorker
-    });
-    delete subJob.subJobWorker;
-    delete subJob.subJobId;
-    newSubJobs.push(subJob);
-    return Object.assign({}, mainJob, { subJobWorker: targetWorker, subJobId: subJob.id });
-  });
-
-  targetJobs.push(...newSubJobs);
   const roundOrder = lookup.roundOrder || [];
   function roundRank(roundName){
     const idx = roundOrder.indexOf(roundName);
     return idx === -1 ? Infinity : idx;
   }
-  targetJobs.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
-  targetJobs.forEach((j,idx)=>{ j.order = idx; });
 
-  await Promise.all([
-    saveJobs(fromWorker, date, updatedSource),
-    saveJobs(targetWorker, date, targetJobs)
-  ]);
+  const fromJobsRef = doc(db,'workeriser',`jobs_${fromWorker}_${date}`);
+  const targetJobsRef = doc(db,'workeriser',`jobs_${targetWorker}_${date}`);
+
+  try{
+    await runTransaction(db, async (tx)=>{
+      const [fromSnap, targetSnap] = await Promise.all([tx.get(fromJobsRef), tx.get(targetJobsRef)]);
+      const source = fromSnap.exists() ? (fromSnap.data().value || []) : [];
+      const targetJobs = targetSnap.exists() ? (targetSnap.data().value || []) : [];
+      const newSubJobs = [];
+
+      const updatedSource = source.map(mainJob=>{
+        if(!idSet.has(mainJob.id)) return mainJob;
+        const subJob = Object.assign({}, mainJob, {
+          id: 'sub_' + mainJob.id + '_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
+          isSubJob: true,
+          mainJobWorker: fromWorker,
+          mainJobId: mainJob.id,
+          lastAssignedBy: fromWorker
+        });
+        delete subJob.subJobWorker;
+        delete subJob.subJobId;
+        newSubJobs.push(subJob);
+        return Object.assign({}, mainJob, { subJobWorker: targetWorker, subJobId: subJob.id });
+      });
+
+      targetJobs.push(...newSubJobs);
+      targetJobs.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
+      targetJobs.forEach((j,idx)=>{ j.order = idx; });
+
+      tx.set(fromJobsRef, { value: updatedSource, updatedAt: Date.now() });
+      tx.set(targetJobsRef, { value: targetJobs, updatedAt: Date.now() });
+    });
+  }catch(err){
+    console.error('splitAndKeepFront transaction failed', err);
+    toast('Connection problem splitting the job — please try again');
+  }
 }
 
 // if the main job turns out to be Skipped or Cancelled, the "back" sub-card is no
@@ -743,9 +777,17 @@ async function rejectSubJobForMainStatus(mainWorker, mainJob, date){
   const superUsers = await loadSuperUsers();
   const target = mainJob.lastAssignedBy || superUsers[0] || 'Simon';
   await moveJobsToWorker(subWorker, target, date, [subJobId]);
-  const mainJobs = await loadJobs(mainWorker, date);
-  const updatedMain = mainJobs.map(j=> j.id===mainJob.id ? (({subJobWorker,subJobId,...rest})=>rest)(j) : j);
-  await saveJobs(mainWorker, date, updatedMain);
+  if(!db) return;
+  const mainJobsRef = doc(db,'workeriser',`jobs_${mainWorker}_${date}`);
+  try{
+    await runTransaction(db, async (tx)=>{
+      const snap = await tx.get(mainJobsRef);
+      if(!snap.exists()) return;
+      const jobs = snap.data().value || [];
+      const updated = jobs.map(j=> j.id===mainJob.id ? (({subJobWorker,subJobId,...rest})=>rest)(j) : j);
+      tx.set(mainJobsRef, { value: updated, updatedAt: Date.now() });
+    });
+  }catch(err){ console.error('rejectSubJobForMainStatus transaction failed', err); }
 }
 
 // pressed from the sub-card's own Reject button, by whoever currently holds it —
@@ -755,33 +797,57 @@ async function rejectSubJobForMainStatus(mainWorker, mainJob, date){
 // its sender; here there's nowhere sensible to send it back TO, since it only
 // exists because of the split in the first place.
 async function rejectSubJobEntirely(subWorker, subJob, date){
+  if(!db){ toast('Not connected to the database'); return; }
+  const subJobsRef = doc(db,'workeriser',`jobs_${subWorker}_${date}`);
+  const subProgRef = doc(db,'workeriser',`progress_${subWorker}_${date}`);
+
   if(subWorker === subJob.mainJobWorker){
     // both halves happen to be held by the same person right now (e.g. mid-undo of
-    // a front split, just after the main job's been moved back) — do this as ONE
-    // combined write, since two separate saveJobs calls to the same list would race
-    const [jobs, prog] = await Promise.all([loadJobs(subWorker, date), loadProgress(subWorker, date)]);
-    const updated = (jobs||[])
-      .filter(j=>j.id!==subJob.id)
-      .map(j=> j.id===subJob.mainJobId ? (({subJobWorker,subJobId,...rest})=>rest)(j) : j);
-    const updatedProg = Object.assign({}, prog);
-    delete updatedProg[subJob.id];
-    await Promise.all([
-      saveJobs(subWorker, date, updated),
-      saveProgress(subWorker, date, updatedProg)
-    ]);
+    // a front split, just after the main job's been moved back) — one transaction
+    // covers both changes at once, since they're the same document
+    try{
+      await runTransaction(db, async (tx)=>{
+        const [jobsSnap, progSnap] = await Promise.all([tx.get(subJobsRef), tx.get(subProgRef)]);
+        const jobs = jobsSnap.exists() ? (jobsSnap.data().value || []) : [];
+        const prog = progSnap.exists() ? (progSnap.data().value || {}) : {};
+        const updated = jobs
+          .filter(j=>j.id!==subJob.id)
+          .map(j=> j.id===subJob.mainJobId ? (({subJobWorker,subJobId,...rest})=>rest)(j) : j);
+        const updatedProg = Object.assign({}, prog);
+        delete updatedProg[subJob.id];
+        tx.set(subJobsRef, { value: updated, updatedAt: Date.now() });
+        tx.set(subProgRef, { value: updatedProg, updatedAt: Date.now() });
+      });
+    }catch(err){
+      console.error('rejectSubJobEntirely (same worker) transaction failed', err);
+      toast('Connection problem — please try again');
+    }
     return;
   }
-  const [subJobs, subProg] = await Promise.all([loadJobs(subWorker, date), loadProgress(subWorker, date)]);
-  const remainingSub = (subJobs||[]).filter(j=>j.id!==subJob.id);
-  const remainingSubProg = Object.assign({}, subProg);
-  delete remainingSubProg[subJob.id];
-  const mainJobs = await loadJobs(subJob.mainJobWorker, date);
-  const updatedMain = (mainJobs||[]).map(j=> j.id===subJob.mainJobId ? (({subJobWorker,subJobId,...rest})=>rest)(j) : j);
-  await Promise.all([
-    saveJobs(subWorker, date, remainingSub),
-    saveProgress(subWorker, date, remainingSubProg),
-    saveJobs(subJob.mainJobWorker, date, updatedMain)
-  ]);
+
+  const mainJobsRef = doc(db,'workeriser',`jobs_${subJob.mainJobWorker}_${date}`);
+  try{
+    await runTransaction(db, async (tx)=>{
+      const [subJobsSnap, subProgSnap, mainJobsSnap] = await Promise.all([
+        tx.get(subJobsRef), tx.get(subProgRef), tx.get(mainJobsRef)
+      ]);
+      const subJobsList = subJobsSnap.exists() ? (subJobsSnap.data().value || []) : [];
+      const subProg = subProgSnap.exists() ? (subProgSnap.data().value || {}) : {};
+      const mainJobs = mainJobsSnap.exists() ? (mainJobsSnap.data().value || []) : [];
+
+      const remainingSub = subJobsList.filter(j=>j.id!==subJob.id);
+      const remainingSubProg = Object.assign({}, subProg);
+      delete remainingSubProg[subJob.id];
+      const updatedMain = mainJobs.map(j=> j.id===subJob.mainJobId ? (({subJobWorker,subJobId,...rest})=>rest)(j) : j);
+
+      tx.set(subJobsRef, { value: remainingSub, updatedAt: Date.now() });
+      tx.set(subProgRef, { value: remainingSubProg, updatedAt: Date.now() });
+      tx.set(mainJobsRef, { value: updatedMain, updatedAt: Date.now() });
+    });
+  }catch(err){
+    console.error('rejectSubJobEntirely transaction failed', err);
+    toast('Connection problem — please try again');
+  }
 }
 
 // reverses a split entirely, for the Undo banner. For a front split (F), the main
@@ -2180,11 +2246,18 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats){
   // cards read from (e.g. the customer asks for a bit more or less while paying
   // whoever's there for the back)
   async function persistMainPrice(newPrice){
-    const freshMainProg = await loadProgress(job.mainJobWorker, date);
-    const current = freshMainProg[job.mainJobId] ? Object.assign({}, freshMainProg[job.mainJobId]) : { status:'todo', payment:'', price:'', frontApplied:false, cancelled:false };
-    current.price = newPrice;
-    freshMainProg[job.mainJobId] = current;
-    await saveProgress(job.mainJobWorker, date, freshMainProg);
+    if(!db) return;
+    const mainProgRef = doc(db,'workeriser',`progress_${job.mainJobWorker}_${date}`);
+    try{
+      await runTransaction(db, async (tx)=>{
+        const snap = await tx.get(mainProgRef);
+        const freshMainProg = snap.exists() ? (snap.data().value || {}) : {};
+        const current = freshMainProg[job.mainJobId] ? Object.assign({}, freshMainProg[job.mainJobId]) : { status:'todo', payment:'', price:'', frontApplied:false, cancelled:false };
+        current.price = newPrice;
+        freshMainProg[job.mainJobId] = current;
+        tx.set(mainProgRef, { value: freshMainProg, updatedAt: Date.now() });
+      });
+    }catch(err){ console.error('persistMainPrice transaction failed', err); }
   }
 
   card.querySelector('[data-action="done"]').onclick = async ()=>{
