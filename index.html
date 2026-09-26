@@ -286,6 +286,13 @@
     width:100%;border:none;background:transparent;font-size:15px;font-weight:600;font-family:'Inter';padding:0;
   }
   .pay-input-wrap input:focus{outline:none;}
+  .pay-input-wrap input:disabled{color:var(--ink-soft);cursor:not-allowed;}
+  .pay-input-wrap.locked{background:#f1f2f4;}
+  .pay-auto-btn{
+    flex:none;background:var(--navy);color:#fff;border:none;border-radius:7px;
+    padding:5px 9px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit;letter-spacing:.02em;
+  }
+  .pay-auto-btn:active{background:var(--navy-deep);}
   .balance-value{
     border:1.5px solid var(--line);border-radius:9px;padding:9px 10px;background:#fbfcfd;
     font-size:13.5px;
@@ -1106,6 +1113,42 @@ function rowsToJobs(rows){
   });
 }
 
+// handles a CSV upload in either mode. 'replace' keeps the old, fully destructive
+// behaviour (an intentional full reset). 'add' merges the new rows onto whatever's
+// already on the list, skipping any row whose Aworka ID already exists there — so
+// uploading a few extra jobs mid-day, or re-adding a job lost to a data problem,
+// doesn't wipe out everything else already on the list (splits, progress, moves
+// included). Wrapped in a transaction so it can't race a concurrent save from the
+// worker's own phone.
+async function performJobListUpload(worker, date, newJobs, mode){
+  if(mode === 'replace'){
+    await saveJobs(worker, date, newJobs);
+    return { added: newJobs.length, skipped: 0 };
+  }
+  if(!db){ toast('Not connected to the database'); return { added: 0, skipped: 0 }; }
+  const jobsRef = doc(db,'workeriser',`jobs_${worker}_${date}`);
+  let added = 0, skipped = 0;
+  try{
+    await runTransaction(db, async (tx)=>{
+      const snap = await tx.get(jobsRef);
+      const existingJobs = snap.exists() ? (snap.data().value || []) : [];
+      const existingIds = new Set(existingJobs.map(j=>j.id));
+      const toAdd = newJobs.filter(j=>!existingIds.has(j.id));
+      skipped = newJobs.length - toAdd.length;
+      added = toAdd.length;
+      let nextOrder = existingJobs.length ? Math.max(...existingJobs.map(j=>j.order||0)) + 1 : 0;
+      toAdd.forEach(j=>{ j.order = nextOrder++; });
+      const merged = existingJobs.concat(toAdd);
+      tx.set(jobsRef, { value: merged, updatedAt: Date.now() });
+    });
+  }catch(err){
+    console.error('performJobListUpload transaction failed', err);
+    toast('Connection problem uploading — please try again');
+    return { added: 0, skipped: 0 };
+  }
+  return { added, skipped };
+}
+
 function navUrl(job){
   if(job.lat != null && job.lon != null){
     return `https://www.google.com/maps/dir/?api=1&destination=${job.lat},${job.lon}`;
@@ -1635,7 +1678,7 @@ async function renderWorker(){
     <div class="topbar-row">
       <div class="brand">
         <div class="brand-mark">${worker[0]}</div>
-        <div class="brand-text"><div class="t1">Job list · ${date}</div><div class="t2">${worker}</div></div>
+        <div class="brand-text"><div class="t1">${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })}</div><div class="t2">${worker}</div></div>
       </div>
       <button class="topbar-btn" id="switchBtn">Switch</button>
       <button class="topbar-btn" id="newCustBtn" style="margin-left:8px;">New</button>
@@ -2071,7 +2114,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     <div class="pay-row">
       <div class="pay-field">
         <label>Cash paid</label>
-        <div class="pay-input-wrap"><span class="pfx">£</span><input type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${p.payment || ''}" class="pay-input"></div>
+        <div class="pay-input-wrap"><span class="pfx">£</span><input type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${p.payment || ''}" class="pay-input"><button type="button" class="pay-auto-btn">Auto</button></div>
       </div>
       <div class="pay-field">
         <label class="balance-label">Today's balance</label>
@@ -2354,20 +2397,32 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     };
   }
 
-  payInput.addEventListener('focus', ()=>{
-    if(payInput.value === ''){
-      const owedRaw = parseFloat(card.querySelector('.balance-value').dataset.owed || '0');
-      if(owedRaw > 0.004){
-        payInput.value = owedRaw.toFixed(2);
-        payInput.select();
+  const payAutoBtn = card.querySelector('.pay-auto-btn');
+  if(payAutoBtn){
+    payAutoBtn.onclick = ()=>{
+      const notCleaned = currentStatus === 'skipped';
+      const chargeToday = notCleaned ? 0 : currentPrice();
+      const owedBeforeThisPayment = debt + chargeToday - linkedPayment;
+      if(owedBeforeThisPayment > 0.004){
+        payInput.value = owedBeforeThisPayment.toFixed(2);
         updateOwedAfter();
         if(onBalanceChange) onBalanceChange();
         persist(current=>{ current.payment = payInput.value; });
         if(refreshStats) refreshStats();
         scheduleReflow(job.id, worker, date);
       }
-    }
-  });
+    };
+  }
+
+  // only one person should ever record the payment for a shared job — if the other
+  // half has already logged something, lock this side out rather than risk a double
+  // entry. This is separate from Done, which each side still marks independently.
+  if(linkedPayment > 0.004){
+    payInput.disabled = true;
+    payInput.placeholder = `Paid to ${job.subJobWorker || 'the other side'}`;
+    payInput.closest('.pay-input-wrap').classList.add('locked');
+    if(payAutoBtn){ payAutoBtn.disabled = true; payAutoBtn.style.display = 'none'; }
+  }
 
   payInput.addEventListener('input', ()=>{
     updateOwedAfter();
@@ -2428,7 +2483,7 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats,onR
     <div class="pay-row">
       <div class="pay-field">
         <label>Cash paid</label>
-        <div class="pay-input-wrap"><span class="pfx">£</span><input type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${p.payment || ''}" class="pay-input"></div>
+        <div class="pay-input-wrap"><span class="pfx">£</span><input type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${p.payment || ''}" class="pay-input"><button type="button" class="pay-auto-btn">Auto</button></div>
       </div>
       <div class="pay-field">
         <label class="balance-label">Today's balance</label>
@@ -2519,6 +2574,29 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats,onR
       persist(current=>{ current.payment = payInput.value; });
     }
   });
+
+  const payAutoBtn = card.querySelector('.pay-auto-btn');
+  if(payAutoBtn){
+    payAutoBtn.onclick = ()=>{
+      const chargeToday = mainNotCleaned ? 0 : currentPrice();
+      const owedBeforeThisPayment = debt + chargeToday - mainPayment;
+      if(owedBeforeThisPayment > 0.004){
+        payInput.value = owedBeforeThisPayment.toFixed(2);
+        updateOwedAfter();
+        persist(current=>{ current.payment = payInput.value; });
+        scheduleReflow(job.id, worker, date);
+      }
+    };
+  }
+
+  // only one person should ever record the payment for a shared job — lock this
+  // side out if the front has already logged something, to avoid a double entry
+  if(mainPayment > 0.004){
+    payInput.disabled = true;
+    payInput.placeholder = `Paid to ${job.mainJobWorker || 'the other side'}`;
+    payInput.closest('.pay-input-wrap').classList.add('locked');
+    if(payAutoBtn){ payAutoBtn.disabled = true; payAutoBtn.style.display = 'none'; }
+  }
 
   priceInput.addEventListener('input', ()=>{
     updateOwedAfter();
@@ -3027,6 +3105,14 @@ async function renderAdminUpload(main){
         </div>
         <input type="date" id="uDate" value="${tomorrowStr()}" style="margin-top:8px;display:none;">
       </div>
+      <div class="field">
+        <label>If this worker already has a list for that date</label>
+        <div class="tab-row" id="uModeChoice" style="margin-bottom:0;">
+          <button type="button" class="tab-btn active" data-choice="add">Add to it</button>
+          <button type="button" class="tab-btn" data-choice="replace">Replace it entirely</button>
+        </div>
+        <p class="muted" id="uModeHint" style="font-size:12px;margin-top:6px;line-height:1.4;">Jobs already on the list (matched by Aworka ID) are left untouched — only genuinely new rows get added.</p>
+      </div>
       <div class="field"><label>CSV file</label><input type="file" id="uFile" accept=".csv,*/*"></div>
       <button class="btn btn-primary btn-block" id="uGo">Load job list</button>
       <div id="uStatus"></div>
@@ -3051,6 +3137,20 @@ async function renderAdminUpload(main){
   });
   updateDateChoiceUI();
 
+  const modeChoiceBtns = card.querySelectorAll('#uModeChoice .tab-btn');
+  const modeHint = card.querySelector('#uModeHint');
+  let uploadMode = 'add';
+  function updateModeChoiceUI(){
+    modeChoiceBtns.forEach(b=>b.classList.toggle('active', b.dataset.choice===uploadMode));
+    modeHint.textContent = uploadMode==='add'
+      ? 'Jobs already on the list (matched by Aworka ID) are left untouched — only genuinely new rows get added.'
+      : '⚠ This deletes everything currently on their list for that date and replaces it with only what\'s in this file — including any jobs sent to or from them, splits, and progress on jobs not in this file.';
+  }
+  modeChoiceBtns.forEach(b=>{
+    b.onclick = ()=>{ uploadMode = b.dataset.choice; updateModeChoiceUI(); };
+  });
+  updateModeChoiceUI();
+
   card.querySelector('#uWorker').addEventListener('change', ()=>{
     card.querySelector('#uFile').value = '';
     card.querySelector('#uStatus').innerHTML = '';
@@ -3062,6 +3162,7 @@ async function renderAdminUpload(main){
     const fileInput = card.querySelector('#uFile');
     const file = fileInput.files[0];
     if(!file){ toast('Choose a CSV file first'); return; }
+    if(uploadMode === 'replace' && !confirm(`Replace ${worker}'s ENTIRE list for ${date}? Everything currently on it — including jobs from splits or moves, and any progress — will be permanently deleted and replaced with only what's in this file.`)) return;
     const reader = new FileReader();
     reader.onload = async (e)=>{
       try{
@@ -3071,7 +3172,7 @@ async function renderAdminUpload(main){
         const missing = await resolveCoordinates(jobs);
         const preSkipped = jobs.filter(j=>j.initialStatus==='skipped');
         jobs.forEach(j=>{ delete j.initialStatus; });
-        await saveJobs(worker,date,jobs);
+        const result = await performJobListUpload(worker, date, jobs, uploadMode);
         if(preSkipped.length){
           const existingProg = await loadProgress(worker,date);
           let changed = false;
@@ -3083,7 +3184,15 @@ async function renderAdminUpload(main){
           });
           if(changed) await saveProgress(worker,date,existingProg);
         }
-        let msg = `Loaded <b>${jobs.length}</b> jobs for <b>${worker}</b> on <b>${date}</b>.`;
+        let msg;
+        if(uploadMode === 'replace'){
+          msg = `Replaced the whole list — <b>${jobs.length}</b> job${jobs.length===1?'':'s'} now on file for <b>${worker}</b> on <b>${date}</b>.`;
+        } else {
+          msg = `Added <b>${result.added}</b> new job${result.added===1?'':'s'} to <b>${worker}</b>'s list for <b>${date}</b>.`;
+          if(result.skipped){
+            msg += ` ${result.skipped} row${result.skipped===1?'':'s'} in the file matched a job already on the list, so ${result.skipped===1?'it was':'they were'} left untouched.`;
+          }
+        }
         if(preSkipped.length){
           msg += ` ${preSkipped.length} marked as skipped from the file.`;
         }
