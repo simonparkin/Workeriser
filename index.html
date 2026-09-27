@@ -495,7 +495,14 @@ async function fsGet(key){
   if(!db) return null;
   const ref = doc(db,'workeriser',key);
   try{
-    const snap = await getDoc(ref);
+    // race against a short timeout — a flaky connection (weak signal, not cleanly
+    // offline) can leave getDoc() trying to reach the server for a long time before
+    // it gives up on its own; better to fall back to the local cache quickly and
+    // let it keep trying in the background than leave the screen blank meanwhile
+    const snap = await Promise.race([
+      getDoc(ref),
+      new Promise((_, reject)=> setTimeout(()=>reject(new Error('read timeout')), 3000))
+    ]);
     return snap.exists() ? snap.data().value : null;
   }catch(err){
     // offline (or a flaky connection) — fall back to whatever's in the local cache
