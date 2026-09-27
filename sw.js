@@ -15,7 +15,17 @@
 
 const CACHE_NAME = 'workeriser-shell-v1';
 
-self.addEventListener('install', () => {
+self.addEventListener('install', (event) => {
+  // pre-cache the app's own page and manifest immediately, rather than waiting for
+  // the fetch handler below to cache them as a side effect of normal browsing —
+  // otherwise the very first install has nothing saved yet, and a refresh with no
+  // signal right after installing would find an empty cache and fail
+  event.waitUntil(
+    caches.open(CACHE_NAME).then(cache => Promise.all([
+      cache.add(self.registration.scope).catch(err => console.error('pre-cache (app page) failed', err)),
+      cache.add(new URL('manifest.json', self.registration.scope).href).catch(err => console.error('pre-cache (manifest) failed', err))
+    ]))
+  );
   self.skipWaiting();
 });
 
