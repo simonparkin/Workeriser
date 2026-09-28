@@ -2333,13 +2333,14 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
   const rejectBtn = card.querySelector('.reject-btn');
   if(rejectBtn){
     rejectBtn.onclick = async ()=>{
-      rejectBtn.disabled = true;
-      rejectBtn.textContent = 'Sending…';
       let target = job.lastAssignedBy;
       if(!target){
         const superUsers = await loadSuperUsers();
         target = superUsers[0] || 'Simon';
       }
+      if(!confirm(`Reject this job and send it back to ${target}?\n\n${job.address}\n\nIt will disappear from your list.`)) return;
+      rejectBtn.disabled = true;
+      rejectBtn.textContent = 'Sending…';
       await moveJobsToWorker(worker, target, date, [job.id]);
       toast(`Sent back to ${target}`);
       render();
