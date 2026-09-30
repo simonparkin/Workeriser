@@ -272,6 +272,10 @@
     padding:8px 4px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;
   }
   .assign-apply-btn:disabled{opacity:.6;}
+  .assign-pending-tag{
+    background:var(--amber-deep);color:#fff;border-radius:20px;padding:2px 9px;
+    font-size:10.5px;font-weight:800;letter-spacing:.02em;vertical-align:middle;
+  }
 
   .pay-row{display:flex;gap:10px;margin-top:12px;}
   .pay-field{flex:1;}
@@ -2157,7 +2161,7 @@ async function renderWorker(){
   armScreenGuard();
 }
 
-function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,onAnyStatusChange,onBalanceChange,customFrontPrices,linkedPayment){
+function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,onAnyStatusChange,onBalanceChange,customFrontPrices,linkedPayment,onQueueAssignment){
   customFrontPrices = customFrontPrices || {};
   linkedPayment = parseFloat(linkedPayment) || 0;
   const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'', frontApplied:false, cancelled:false };
@@ -2216,7 +2220,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     </div>
     ${onReassigned ? `
     <div class="field" style="margin-top:10px;">
-      <label>Assigned to <span class="muted" style="font-weight:400;font-size:11px;">(tick up to 2 for a front/back split)</span></label>
+      <label>Assigned to <span class="muted" style="font-weight:400;font-size:11px;">(tick up to 2 for a front/back split)</span> <span class="assign-pending-tag" style="display:none;">Pending</span></label>
       <div class="assign-checkbox-grid">
         ${WORKERS.map(w=>`<label class="assign-checkbox-item"><input type="checkbox" class="assign-checkbox" value="${escapeHtml(w)}"><span>${escapeHtml(w)}</span><span class="assign-role-tag"></span></label>`).join('')}
       </div>
@@ -2350,6 +2354,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
   const assignCheckboxes = card.querySelectorAll('.assign-checkbox');
   if(assignCheckboxes.length){
     const applyBtn = card.querySelector('.assign-apply-btn');
+    const pendingTag = card.querySelector('.assign-pending-tag');
     // figure out who's currently assigned, front first then back, from the job's own
     // state — works whether we're looking at the front card or the back card.
     // de-duplicated defensively: if a job's linked worker ever happens to equal its
@@ -2365,6 +2370,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
       checkOrder = [...new Set([worker, job.subJobWorker])];
     }
     checkOrder = checkOrder.filter(w => WORKERS.includes(w));
+    const originalCheckOrder = checkOrder.slice();
 
     function refreshCheckboxUI(){
       const checkedCount = checkOrder.length;
@@ -2400,7 +2406,15 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
           checkOrder = wouldRemain;
         }
         refreshCheckboxUI();
-        applyBtn.style.display = 'block';
+        if(onQueueAssignment){
+          // ticking the boxes IS the action — no separate per-card commit step.
+          // Back to the original selection means this card drops out of the queue.
+          const changed = checkOrder.length !== originalCheckOrder.length || checkOrder.some((w,i)=>w!==originalCheckOrder[i]);
+          onQueueAssignment(worker, job, changed ? checkOrder.slice() : null);
+          if(pendingTag) pendingTag.style.display = changed ? 'inline' : 'none';
+        } else {
+          applyBtn.style.display = 'block';
+        }
       });
     });
 
@@ -2536,7 +2550,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
 // the shared balance, and a single Done button. No Skip/Cancel here — if the main
 // card ends up skipped or cancelled, this card gets rejected back automatically,
 // since the main card already reports that outcome for the whole job.
-function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats,onReassigned){
+function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats,onReassigned,onQueueAssignment){
   const p = prog[job.id] || { status:'todo', payment:'', note:'' };
   const card = document.createElement('div');
   card.className = `card job-card sub-job-card status-${p.status}`;
@@ -2586,7 +2600,7 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats,onR
     </div>
     ${onReassigned ? `
     <div class="field" style="margin-top:10px;">
-      <label>Assigned to <span class="muted" style="font-weight:400;font-size:11px;">(tick up to 2 for a front/back split)</span></label>
+      <label>Assigned to <span class="muted" style="font-weight:400;font-size:11px;">(tick up to 2 for a front/back split)</span> <span class="assign-pending-tag" style="display:none;">Pending</span></label>
       <div class="assign-checkbox-grid">
         ${WORKERS.map(w=>`<label class="assign-checkbox-item"><input type="checkbox" class="assign-checkbox" value="${escapeHtml(w)}"><span>${escapeHtml(w)}</span><span class="assign-role-tag"></span></label>`).join('')}
       </div>
@@ -2709,7 +2723,9 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats,onR
   const assignCheckboxes = card.querySelectorAll('.assign-checkbox');
   if(assignCheckboxes.length){
     const applyBtn = card.querySelector('.assign-apply-btn');
+    const pendingTag = card.querySelector('.assign-pending-tag');
     let checkOrder = [...new Set([job.mainJobWorker, worker])]; // front first, then this back card's own worker
+    const originalCheckOrder = checkOrder.slice();
 
     function refreshCheckboxUI(){
       const checkedCount = checkOrder.length;
@@ -2741,7 +2757,13 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats,onR
           checkOrder = wouldRemain;
         }
         refreshCheckboxUI();
-        applyBtn.style.display = 'block';
+        if(onQueueAssignment){
+          const changed = checkOrder.length !== originalCheckOrder.length || checkOrder.some((w,i)=>w!==originalCheckOrder[i]);
+          onQueueAssignment(worker, job, changed ? checkOrder.slice() : null);
+          if(pendingTag) pendingTag.style.display = changed ? 'inline' : 'none';
+        } else {
+          applyBtn.style.display = 'block';
+        }
       });
     });
 
@@ -3364,12 +3386,69 @@ async function renderAdminDayManagement(main, header){
   header.appendChild(dmReorderBar);
   const selectedForReorder = new Set();
 
+  const dmAssignBar = document.createElement('div');
+  header.appendChild(dmAssignBar);
+  // keyed by cardWorker+jobId so a job appearing on two different workers' views
+  // (shouldn't normally happen, but just in case) doesn't collide
+  const pendingAssignments = new Map();
+
+  function updateAssignBar(){
+    dmAssignBar.innerHTML = '';
+    if(!pendingAssignments.size) return;
+    const box = document.createElement('div');
+    box.className = 'move-bar';
+    box.style.marginTop = '12px';
+    box.innerHTML = `
+      <div class="move-bar-label">${pendingAssignments.size} assignment change${pendingAssignments.size===1?'':'s'} ready</div>
+      <div class="move-bar-targets">
+        <button type="button" class="move-target-btn" id="applyAllAssignBtn">Apply all</button>
+        <button type="button" class="move-dismiss-btn" id="discardAllAssignBtn" style="border:none;border-radius:20px;padding:8px 14px;font-weight:700;font-size:13px;cursor:pointer;">Discard</button>
+      </div>
+    `;
+    dmAssignBar.appendChild(box);
+    box.querySelector('#applyAllAssignBtn').onclick = async ()=>{
+      const btn = box.querySelector('#applyAllAssignBtn');
+      btn.disabled = true;
+      btn.textContent = 'Applying…';
+      const applyDate = card.querySelector('#dmDate').value || todayStr();
+      const entries = Array.from(pendingAssignments.values());
+      // applied one at a time, not in parallel — several changes can touch the
+      // same worker's list, and running them concurrently risks one overwriting
+      // another's change
+      for(const {cardWorker, cardJob, newAssignment} of entries){
+        await applyFrontBackAssignment(cardWorker, cardJob, applyDate, newAssignment);
+      }
+      pendingAssignments.clear();
+      toast(`Applied ${entries.length} assignment change${entries.length===1?'':'s'}`);
+      loadAndRender(true);
+    };
+    box.querySelector('#discardAllAssignBtn').onclick = ()=>{
+      pendingAssignments.clear();
+      loadAndRender(true);
+    };
+  }
+
+  function queueAssignmentChange(cardWorker, cardJob, newAssignment){
+    const key = cardWorker + '|' + cardJob.id;
+    if(newAssignment === null){
+      pendingAssignments.delete(key);
+    } else {
+      pendingAssignments.set(key, {cardWorker, cardJob, newAssignment});
+    }
+    updateAssignBar();
+  }
+
   async function loadAndRender(keepSelection){
     if(!keepSelection) selectedForReorder.clear();
+    // the queue always clears on a (re)load — the job data it was built against
+    // may no longer be current (a reorder, the auto-heal check, or someone else's
+    // change since it was queued), so applying it later could act on stale data
+    pendingAssignments.clear();
     const worker = card.querySelector('#dmWorker').value;
     const date = card.querySelector('#dmDate').value || todayStr();
     out.innerHTML = '<p class="muted">Loading…</p>';
     dmReorderBar.innerHTML = '';
+    dmAssignBar.innerHTML = '';
 
     const healedCount = await healBrokenSplitLinks(date);
     if(healedCount){
@@ -3427,12 +3506,12 @@ async function renderAdminDayManagement(main, header){
         const mainJob = (job.isSubJob && job.mainJobWorker && job.mainJobId) ? jobsByWorker.get(job.mainJobWorker)?.get(job.mainJobId) : null;
         if(mainJob){
           // confirmed-valid link — show it exactly as the worker's own screen would
-          cardEl = renderSubJobCard(w, date, job, prog, mainJob, progByWorker.get(job.mainJobWorker) || {}, null, loadAndRender);
+          cardEl = renderSubJobCard(w, date, job, prog, mainJob, progByWorker.get(job.mainJobWorker) || {}, null, loadAndRender, queueAssignmentChange);
         } else {
           cardEl = renderJobCard(w, date, job, prog, null, true, loadAndRender, null, ()=>{
             const fn = balanceLinkHandlers.get(job.id);
             if(fn) fn();
-          },customFrontPrices);
+          },customFrontPrices,0,queueAssignmentChange);
         }
         listWrap.appendChild(cardEl);
         cardMap.set(job.id, cardEl);
@@ -3586,11 +3665,11 @@ async function renderAdminDayManagement(main, header){
       // isSuper=true hides the Reject button, which is meant for field workers, not admin edits
       const linked = linkedMainMap.get(job.id);
       const cardEl = linked
-        ? renderSubJobCard(worker, date, job, prog, linked.mainJob, linked.mainProg, null, loadAndRender)
+        ? renderSubJobCard(worker, date, job, prog, linked.mainJob, linked.mainProg, null, loadAndRender, queueAssignmentChange)
         : renderJobCard(worker, date, job, prog, null, true, loadAndRender, null, ()=>{
             const fn = dmBalanceLinkHandlers.get(job.id);
             if(fn) fn();
-          },customFrontPrices);
+          },customFrontPrices,0,queueAssignmentChange);
       cardEl.style.flex = '1';
       cardEl.style.marginBottom = '0';
       row.appendChild(controls);
