@@ -3568,11 +3568,29 @@ async function renderAdminDayManagement(main, header){
     const sorted = jobs.slice().sort((a,b)=>a.order-b.order);
     out.innerHTML = '';
 
+    const customFrontPrices = await loadCustomFrontPrices();
+    // a sub-card's price edits are written to the MAIN job's own progress, not its
+    // own — so its own progress never carries a price, and resolvedPrice() would
+    // otherwise fall back to a frozen snapshot from when the split was created
+    let workerTotal = 0;
+    for(const j of jobs){
+      let price;
+      if(j.isSubJob && j.mainJobWorker && j.mainJobId){
+        const mainProg = await loadProgress(j.mainJobWorker, date);
+        price = resolvedPrice(j, mainProg[j.mainJobId]);
+      } else {
+        price = resolvedPrice(j, prog[j.id]);
+      }
+      workerTotal += splitEarnedShare(j, price, customFrontPrices);
+    }
+    const [dYear, dMonth, dDay] = date.split('-');
+    const ddmmyyyy = `${dDay}/${dMonth}/${dYear}`;
+
     const headerCard = document.createElement('div');
     headerCard.className = 'card pad';
     headerCard.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-        <div style="font-weight:700;">${jobs.length} job${jobs.length===1?'':'s'} · ${escapeHtml(worker)} · ${date}</div>
+        <div style="font-weight:700;">${ddmmyyyy} · ${jobs.length} job${jobs.length===1?'':'s'} · ${money(workerTotal)} total</div>
         <div style="display:flex;gap:6px;">
           <button type="button" id="dmReverse" style="background:transparent;border:1.5px solid var(--line);color:var(--navy);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:700;cursor:pointer;">Reverse order</button>
           <button type="button" id="dmClear" style="background:transparent;border:1.5px solid var(--line);color:var(--red);border-radius:8px;padding:6px 11px;font-size:12.5px;font-weight:700;cursor:pointer;">Clear</button>
@@ -3632,7 +3650,6 @@ async function renderAdminDayManagement(main, header){
     let lastRound = null;
     const dmBalanceLinkHandlers = new Map();
     const dmCardMap = new Map();
-    const customFrontPrices = await loadCustomFrontPrices();
 
     // pre-fetch any sub-cards' main job data (which might belong to a different
     // worker) so each one can be shown exactly as the worker's own screen would
