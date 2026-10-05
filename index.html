@@ -862,8 +862,36 @@ async function splitAndKeepFront(fromWorker, date, jobIds, targetWorker){
   }
 }
 
-// if the main job turns out to be Skipped or Cancelled, the "back" sub-card is no
-// longer relevant for today — send it back the same way Reject does, rather than
+// when the front card is skipped, the back card is skipped too — it stays with
+// whoever holds it, just marked skipped like any other skipped job. Un-skipping
+// the front puts it back to to-do. A back card already marked Done is left alone
+// (that work was done), and a back card can only ever be "skipped" through this,
+// since it has no Skip button of its own, so restoring is always safe.
+// Needs a connection (it writes to the other person's progress, via a transaction);
+// the back card's own phone catches up on load if this couldn't go through.
+async function syncSubCardSkipped(subWorker, subJobId, date, skipped){
+  if(!db) return;
+  const ref = doc(db,'workeriser',`progress_${subWorker}_${date}`);
+  try{
+    await runTransactionOnline(db, async (tx)=>{
+      const snap = await tx.get(ref);
+      const prog = snap.exists() ? (snap.data().value || {}) : {};
+      const cur = prog[subJobId] ? Object.assign({}, prog[subJobId]) : { status:'todo', payment:'', note:'' };
+      if(skipped){
+        if(cur.status !== 'todo') return;
+        cur.status = 'skipped';
+      } else {
+        if(cur.status !== 'skipped') return;
+        cur.status = 'todo';
+      }
+      prog[subJobId] = cur;
+      tx.set(ref, { value: prog, updatedAt: Date.now() });
+    });
+  }catch(err){ console.error('syncSubCardSkipped failed (back card will catch up on its own phone)', err); }
+}
+
+// if the main job is Cancelled (and not done), the "back" sub-card is no longer
+// relevant for today — send it back the same way Reject does, rather than
 // leaving the second worker with a stray card for a job that isn't happening
 async function rejectSubJobForMainStatus(mainWorker, mainJob, date){
   if(!mainJob.subJobWorker || !mainJob.subJobId) return;
@@ -1859,8 +1887,6 @@ async function renderWorker(){
   }
 
   const sorted = jobs.slice().sort((a,b)=>a.order-b.order);
-  const todoJobs = sorted.filter(j=> !prog[j.id] || prog[j.id].status==='todo');
-  const completedJobs = sorted.filter(j=> prog[j.id] && prog[j.id].status!=='todo');
   const customFrontPrices = await loadCustomFrontPrices();
 
   // split jobs (worked on by two people at once) need data from the OTHER worker's
@@ -1878,6 +1904,28 @@ async function renderWorker(){
       linkedDataMap.set(j.id, { kind:'main', subPayment: parseFloat(subP.payment)||0 });
     }
   }));
+
+  // a back card follows its front card being skipped. The front card's phone normally
+  // marks it the moment it's skipped, but if that happened with no signal the write
+  // couldn't reach this phone's progress — so catch up here, on this card's own phone
+  // (a plain write to its own list, which works offline too). Done before to-do and
+  // completed are split, so the result shows straight away.
+  for(const j of sorted){
+    const linked = linkedDataMap.get(j.id);
+    if(!linked || linked.kind !== 'sub') continue;
+    const frontSkipped = (linked.mainProg[linked.mainJob.id] || {}).status === 'skipped';
+    const ownStatus = prog[j.id] ? prog[j.id].status : 'todo';
+    if(frontSkipped && ownStatus === 'todo'){
+      await setJobStatusFlag(j.id, 'skipped');
+      prog[j.id] = Object.assign({ payment:'', note:'' }, prog[j.id], { status:'skipped' });
+    } else if(!frontSkipped && ownStatus === 'skipped'){
+      await setJobStatusFlag(j.id, 'todo');
+      prog[j.id] = Object.assign({ payment:'', note:'' }, prog[j.id], { status:'todo' });
+    }
+  }
+
+  const todoJobs = sorted.filter(j=> !prog[j.id] || prog[j.id].status==='todo');
+  const completedJobs = sorted.filter(j=> prog[j.id] && prog[j.id].status!=='todo');
 
   const balanceLinkHandlers = new Map(); // job.id -> recompute function, wired up after all cards exist
 
@@ -2300,6 +2348,7 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
   card.querySelectorAll('.status-btn').forEach(btn=>{
     btn.onclick = async ()=>{
       const action = btn.dataset.action;
+      const prevStatus = currentStatus;
       let newStatus = currentStatus;
       let newCancelled = currentCancelled;
       if(action === 'cancelled'){
@@ -2327,10 +2376,16 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
       if(refreshStats) refreshStats();
       scheduleReflow(job.id, worker, date);
       if(onAnyStatusChange) onAnyStatusChange(job.id);
-      if(job.subJobWorker && (newStatus === 'skipped' || (newCancelled && newStatus !== 'done'))){
-        rejectSubJobForMainStatus(worker, job, date);
-        delete job.subJobWorker;
-        delete job.subJobId;
+      if(job.subJobWorker){
+        if(newStatus === 'skipped'){
+          syncSubCardSkipped(job.subJobWorker, job.subJobId, date, true);
+        } else if(newCancelled && newStatus !== 'done'){
+          rejectSubJobForMainStatus(worker, job, date);
+          delete job.subJobWorker;
+          delete job.subJobId;
+        } else if(prevStatus === 'skipped'){
+          syncSubCardSkipped(job.subJobWorker, job.subJobId, date, false);
+        }
       }
     };
   });
@@ -2583,7 +2638,7 @@ function renderSubJobCard(worker,date,job,prog,mainJob,mainProg,refreshStats,onR
       </div>
     </div>
     <div class="job-controls">
-      <button class="status-btn ${p.status==='done'?'active-done':''}" data-action="done" style="flex:1;"><span class="ic">✓</span>Done</button>
+      <button class="status-btn ${p.status==='done'?'active-done':''}${p.status==='skipped'?' active-skipped':''}" data-action="done" style="flex:1;"${p.status==='skipped'?' disabled':''}><span class="ic">${p.status==='skipped'?'↷':'✓'}</span>${p.status==='skipped'?'Skipped (front was skipped)':'Done'}</button>
     </div>
     <div class="pay-row">
       <div class="pay-field">
