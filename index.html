@@ -651,11 +651,6 @@ async function moveJobsToWorker(fromWorker, toWorker, date, jobIds){
   if(!db){ toast('Not connected to the database'); return; }
   const lookup = await loadCoordLookup();
   const idSet = new Set(jobIds);
-  const roundOrder = lookup.roundOrder || [];
-  function roundRank(roundName){
-    const idx = roundOrder.indexOf(roundName);
-    return idx === -1 ? Infinity : idx;
-  }
 
   const fromJobsRef = doc(db,'workeriser',`jobs_${fromWorker}_${date}`);
   const toJobsRef = doc(db,'workeriser',`jobs_${toWorker}_${date}`);
@@ -678,18 +673,16 @@ async function moveJobsToWorker(fromWorker, toWorker, date, jobIds){
 
       moving.forEach(j=>{
         j.lastAssignedBy = fromWorker;
-        toJobs.push(j);
         if(fromProg[j.id]){
           toProg[j.id] = fromProg[j.id];
           delete fromProg[j.id];
         }
       });
 
-      toJobs.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
-      toJobs.forEach((j,idx)=>{ j.order = idx; });
+      const newToJobs = insertJobsIntoListInOrder(toJobs, moving, lookup);
 
       tx.set(fromJobsRef, { value: remaining, updatedAt: Date.now() });
-      tx.set(toJobsRef, { value: toJobs, updatedAt: Date.now() });
+      tx.set(toJobsRef, { value: newToJobs, updatedAt: Date.now() });
       tx.set(fromProgRef, { value: fromProg, updatedAt: Date.now() });
       tx.set(toProgRef, { value: toProg, updatedAt: Date.now() });
     });
@@ -744,11 +737,6 @@ async function splitAndSendJobs(fromWorker, date, jobIds, targetWorker){
   if(!db){ toast('Not connected to the database'); return; }
   const lookup = await loadCoordLookup();
   const idSet = new Set(jobIds);
-  const roundOrder = lookup.roundOrder || [];
-  function roundRank(roundName){
-    const idx = roundOrder.indexOf(roundName);
-    return idx === -1 ? Infinity : idx;
-  }
 
   const fromJobsRef = doc(db,'workeriser',`jobs_${fromWorker}_${date}`);
   const targetJobsRef = doc(db,'workeriser',`jobs_${targetWorker}_${date}`);
@@ -768,6 +756,7 @@ async function splitAndSendJobs(fromWorker, date, jobIds, targetWorker){
       const splitting = source.filter(j=>idSet.has(j.id));
       const remaining = source.filter(j=>!idSet.has(j.id));
       const newSubJobs = [];
+      const newMains = [];
 
       splitting.forEach(mainJob=>{
         const subJob = Object.assign({}, mainJob, {
@@ -786,21 +775,18 @@ async function splitAndSendJobs(fromWorker, date, jobIds, targetWorker){
           subJobId: subJob.id,
           lastAssignedBy: fromWorker
         });
-        targetJobs.push(updatedMain);
+        newMains.push(updatedMain);
         if(fromProg[mainJob.id]){
           targetProg[mainJob.id] = fromProg[mainJob.id];
           delete fromProg[mainJob.id];
         }
       });
 
-      const senderList = remaining.concat(newSubJobs);
-      senderList.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
-      senderList.forEach((j,idx)=>{ j.order = idx; });
-      targetJobs.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
-      targetJobs.forEach((j,idx)=>{ j.order = idx; });
+      const senderList = insertJobsIntoListInOrder(remaining, newSubJobs, lookup);
+      const newTargetJobs = insertJobsIntoListInOrder(targetJobs, newMains, lookup);
 
       tx.set(fromJobsRef, { value: senderList, updatedAt: Date.now() });
-      tx.set(targetJobsRef, { value: targetJobs, updatedAt: Date.now() });
+      tx.set(targetJobsRef, { value: newTargetJobs, updatedAt: Date.now() });
       tx.set(fromProgRef, { value: fromProg, updatedAt: Date.now() });
       tx.set(targetProgRef, { value: targetProg, updatedAt: Date.now() });
     });
@@ -818,11 +804,6 @@ async function splitAndKeepFront(fromWorker, date, jobIds, targetWorker){
   if(!db){ toast('Not connected to the database'); return; }
   const lookup = await loadCoordLookup();
   const idSet = new Set(jobIds);
-  const roundOrder = lookup.roundOrder || [];
-  function roundRank(roundName){
-    const idx = roundOrder.indexOf(roundName);
-    return idx === -1 ? Infinity : idx;
-  }
 
   const fromJobsRef = doc(db,'workeriser',`jobs_${fromWorker}_${date}`);
   const targetJobsRef = doc(db,'workeriser',`jobs_${targetWorker}_${date}`);
@@ -849,12 +830,10 @@ async function splitAndKeepFront(fromWorker, date, jobIds, targetWorker){
         return Object.assign({}, mainJob, { subJobWorker: targetWorker, subJobId: subJob.id });
       });
 
-      targetJobs.push(...newSubJobs);
-      targetJobs.sort((a,b)=> roundRank(a.round) - roundRank(b.round));
-      targetJobs.forEach((j,idx)=>{ j.order = idx; });
+      const newTargetJobs = insertJobsIntoListInOrder(targetJobs, newSubJobs, lookup);
 
       tx.set(fromJobsRef, { value: updatedSource, updatedAt: Date.now() });
-      tx.set(targetJobsRef, { value: targetJobs, updatedAt: Date.now() });
+      tx.set(targetJobsRef, { value: newTargetJobs, updatedAt: Date.now() });
     });
   }catch(err){
     console.error('splitAndKeepFront transaction failed', err);
@@ -1631,6 +1610,30 @@ function roundOrderRank(job, lookup){
 
 function sortJobsByRoundOrder(jobs, lookup){
   return jobs.slice().sort((a,b)=> roundOrderRank(a,lookup) - roundOrderRank(b,lookup));
+}
+
+// used when jobs arrive on a list via a move or split. The existing jobs on that
+// list keep their current relative order exactly as it already is — which may
+// include a deliberate manual reorder from that day's own CSV (e.g. a business
+// pulled to the very front of the morning so as not to disturb anyone later) —
+// since the round-order reference file has no idea that override exists and would
+// otherwise silently undo it. Only the newly-arriving jobs get positioned, slotted
+// in by round order relative to the list as it already stands.
+function insertJobsIntoListInOrder(existingJobs, newJobs, lookup){
+  const result = existingJobs.slice();
+  newJobs.forEach(newJob=>{
+    const newRank = roundOrderRank(newJob, lookup);
+    let insertAt = result.length;
+    for(let i=0;i<result.length;i++){
+      if(roundOrderRank(result[i], lookup) > newRank){
+        insertAt = i;
+        break;
+      }
+    }
+    result.splice(insertAt, 0, newJob);
+  });
+  result.forEach((j,idx)=>{ j.order = idx; });
+  return result;
 }
 
 // report-table cell for what was actually charged today, flagging front-only prices
