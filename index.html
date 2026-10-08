@@ -1163,6 +1163,22 @@ function pick(row, candidates){
   return '';
 }
 
+// the per-worker CSV exports actually used for day-to-day uploads don't carry
+// either an "Aworka Customer ID" or a populated "Customer Ref" column — both come
+// back empty, confirmed against several of Simon's real exports. With no stable id
+// to key on at all, this falls back to the customer's own name + address, trimmed
+// and normalised — the same two things that already reliably group a customer's
+// multiple job cards together in those exports (checked against a real example:
+// two cards for the same customer, same address, different prices). Not as sturdy
+// as a real id (a customer who's renamed or re-addressed in Aworka would get a
+// "new" key), but it's the best grouping available from what these exports give us.
+function customerFallbackKey(name, address){
+  const n = (name||'').trim().toLowerCase();
+  const a = (address||'').trim().toLowerCase().replace(/\s+/g,' ');
+  if(!n && !a) return null;
+  return 'na:' + n + '|' + a;
+}
+
 function rowsToJobs(rows){
   return rows.map((r,idx)=>{
     const price = parseFloat(pick(r,['Price'])) || 0;
@@ -1174,17 +1190,19 @@ function rowsToJobs(rows){
     const postcode = pick(r,['Job Postcode','Customer Postcode']);
     const phone = pick(r,['Job Phone 1','Customer Phone 1','Phone 1']);
     const csvStatus = (pick(r,['Status']) || '').trim().toLowerCase();
+    const customerName = (pick(r,['Customer Name','Customer']) || '').trim();
     return {
       id: pick(r,['Aworka Job ID','Aworka ID','Job Ref']) || ('row'+idx),
       // the stable per-CUSTOMER id (as opposed to the per-JOB id above) — a customer
       // with more than one job card (e.g. a conservatory extra billed separately from
       // the rest of the house) has a different id per card but shares this one, which
       // is what lets the debt-cap tally below be tracked per customer rather than
-      // per card. Falls back to Customer Ref (older/thinner CSV exports) if the
-      // dedicated Aworka customer id column isn't present in this export.
-      customerId: pick(r,['Aworka Customer ID','Customer Ref']) || null,
+      // per card. Falls back through Customer Ref, then to name+address, since the
+      // real per-worker exports carry neither a populated Aworka Customer ID nor a
+      // populated Customer Ref (see customerFallbackKey above).
+      customerId: pick(r,['Aworka Customer ID','Customer Ref']) || customerFallbackKey(customerName, address),
       order: idx,
-      customer: (pick(r,['Customer Name','Customer']) || '').trim() || '(no name on file)',
+      customer: customerName || '(no name on file)',
       address: address,
       postcode: postcode,
       phone: phone,
