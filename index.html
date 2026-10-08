@@ -1176,6 +1176,13 @@ function rowsToJobs(rows){
     const csvStatus = (pick(r,['Status']) || '').trim().toLowerCase();
     return {
       id: pick(r,['Aworka Job ID','Aworka ID','Job Ref']) || ('row'+idx),
+      // the stable per-CUSTOMER id (as opposed to the per-JOB id above) — a customer
+      // with more than one job card (e.g. a conservatory extra billed separately from
+      // the rest of the house) has a different id per card but shares this one, which
+      // is what lets the debt-cap tally below be tracked per customer rather than
+      // per card. Falls back to Customer Ref (older/thinner CSV exports) if the
+      // dedicated Aworka customer id column isn't present in this export.
+      customerId: pick(r,['Aworka Customer ID','Customer Ref']) || null,
       order: idx,
       customer: (pick(r,['Customer Name','Customer']) || '').trim() || '(no name on file)',
       address: address,
@@ -1196,6 +1203,145 @@ function rowsToJobs(rows){
   });
 }
 
+/* ================= CUSTOMER DEBT-CAP TALLY ================= */
+// The "4th time" cap used to be worked out by dividing a job's current balance by
+// its own price. That breaks in two real situations: a customer with more than one
+// job card sharing the same office balance (e.g. a conservatory extra that's only
+// done every other visit) divides the shared debt by whichever card's own price is
+// smaller and false-triggers on that card specifically; and a visit charged at the
+// front-only price divides by the wrong price and can fail to trigger at all.
+//
+// Instead, this tracks a plain running count — per CUSTOMER, not per job card — of
+// how many visits have gone by with money still owed afterwards. It's stored once
+// here (keyed by the customer's Aworka Customer ID / Customer Ref, see rowsToJobs),
+// so every card for that customer reads the same number regardless of its own price.
+// Reset to zero the moment a CSV upload shows that customer's office balance has
+// come back down to £0 — the point at which the office considers them settled.
+//
+// Each customer's entry also remembers exactly which job card(s) caused each date
+// to count, so one card for a customer clearing its own balance doesn't wrongly
+// cancel out another card for the same customer/date that still has money owed.
+const DEBT_CAP_VISITS = 4;
+
+async function loadCustomerTally(){ return (await fsGet('customer_tally')) || {}; }
+
+// called whenever a card's own status/payment/price settles into a new state —
+// idempotent and safe to call repeatedly with the same inputs, since it only
+// writes when this specific job's contribution to this date actually changes.
+async function syncUnpaidVisit(customerId, jobId, date, shouldCount){
+  if(!customerId || !db) return;
+  const ref = doc(db,'workeriser','customer_tally');
+  try{
+    await runTransactionOnline(db, async (tx)=>{
+      const snap = await tx.get(ref);
+      const all = snap.exists() ? (snap.data().value || {}) : {};
+      const existing = all[customerId] || { count:0, seen:{} };
+      const entry = { count: existing.count || 0, seen: Object.assign({}, existing.seen||{}) };
+      const dateJobs = new Set(entry.seen[date] || []);
+      const hadDate = dateJobs.size > 0;
+      if(shouldCount){
+        if(dateJobs.has(jobId)) return; // no change — skip the write entirely
+        dateJobs.add(jobId);
+      } else {
+        if(!dateJobs.has(jobId)) return; // no change — skip the write entirely
+        dateJobs.delete(jobId);
+      }
+      const hasDateNow = dateJobs.size > 0;
+      if(hasDateNow) entry.seen[date] = Array.from(dateJobs);
+      else delete entry.seen[date];
+      if(!hadDate && hasDateNow) entry.count += 1;
+      else if(hadDate && !hasDateNow) entry.count = Math.max(0, entry.count - 1);
+      all[customerId] = entry;
+      tx.set(ref, { value: all, updatedAt: Date.now() });
+    });
+  }catch(err){
+    console.error('syncUnpaidVisit failed', err);
+  }
+}
+
+// run against whatever rows were just uploaded (not the merged list) — a CSV
+// bringing in a £0 balance for a customer is the office's own signal that they've
+// been settled, so their tally is wiped clean rather than merely decremented.
+async function resetCustomerTallyForZeroBalances(csvJobs){
+  const zeroedIds = Array.from(new Set(
+    (csvJobs||[]).filter(j=>j.customerId && Math.abs(j.balance||0) < 0.005).map(j=>j.customerId)
+  ));
+  if(!zeroedIds.length || !db) return;
+  const ref = doc(db,'workeriser','customer_tally');
+  try{
+    await runTransactionOnline(db, async (tx)=>{
+      const snap = await tx.get(ref);
+      const all = snap.exists() ? (snap.data().value || {}) : {};
+      let changed = false;
+      zeroedIds.forEach(id=>{
+        const existing = all[id];
+        if(existing && (existing.count || (existing.seen && Object.keys(existing.seen).length))){
+          all[id] = { count:0, seen:{} };
+          changed = true;
+        }
+      });
+      if(changed) tx.set(ref, { value: all, updatedAt: Date.now() });
+    });
+  }catch(err){
+    console.error('resetCustomerTallyForZeroBalances failed', err);
+  }
+}
+
+// STOP-GAP for the first few months after this tally replaces the old balance÷price
+// mechanic: the tally starts at zero for every customer, since it can only count
+// visits it's actually seen go by. Without this, a customer genuinely several
+// unpaid visits deep right now would show nothing until that many more visits had
+// happened under the new system — up to 3-4 months for a typical round, which is
+// exactly the confusing gap being worked around here.
+//
+// So the very next time a customer's row comes in on ANY CSV upload, and the tally
+// has never tracked them before, their count is seeded from a one-off estimate:
+// their current office balance divided by the combined price of ALL their job
+// cards in that upload — not any single card's own price, which is what caused
+// the original bug (a cheap conservatory-only card dividing the whole shared
+// debt). That makes the seed itself immune to the multi-card problem, though it
+// can't recover a front-only visit from the past — it's a reasonable one-time
+// estimate, not a perfect reconstruction. A customer is only ever seeded once:
+// after this, their count is purely the real tracked tally, same as everyone else.
+async function seedCustomerTallyFromBalances(csvJobs){
+  if(!db) return;
+  const byCustomer = new Map();
+  (csvJobs||[]).forEach(j=>{
+    if(!j.customerId) return;
+    if(!byCustomer.has(j.customerId)) byCustomer.set(j.customerId, { balance: 0, totalPrice: 0 });
+    const entry = byCustomer.get(j.customerId);
+    entry.balance = j.balance || 0; // shared across all of a customer's rows — any one of them carries it
+    entry.totalPrice += (j.price || 0);
+  });
+  const estimates = {};
+  byCustomer.forEach((v, customerId)=>{
+    const debt = -v.balance;
+    if(debt > 0.004 && v.totalPrice > 0.004){
+      const est = Math.floor((debt / v.totalPrice) + 0.0001);
+      if(est > 0) estimates[customerId] = Math.min(est, 20); // sanity cap — this is a rough seed, not a real count
+    }
+  });
+  const ids = Object.keys(estimates);
+  if(!ids.length) return;
+  const ref = doc(db,'workeriser','customer_tally');
+  try{
+    await runTransactionOnline(db, async (tx)=>{
+      const snap = await tx.get(ref);
+      const all = snap.exists() ? (snap.data().value || {}) : {};
+      let changed = false;
+      ids.forEach(id=>{
+        if(!all[id]){ // only ever seed a customer the tally has genuinely never tracked before
+          all[id] = { count: estimates[id], seen:{} };
+          changed = true;
+        }
+      });
+      if(changed) tx.set(ref, { value: all, updatedAt: Date.now() });
+    });
+  }catch(err){
+    console.error('seedCustomerTallyFromBalances failed', err);
+  }
+}
+
 // handles a CSV upload in either mode. 'replace' keeps the old, fully destructive
 // behaviour (an intentional full reset). 'add' merges the new rows onto whatever's
 // already on the list, skipping any row whose Aworka ID already exists there — so
@@ -1204,6 +1350,8 @@ function rowsToJobs(rows){
 // included). Wrapped in a transaction so it can't race a concurrent save from the
 // worker's own phone.
 async function performJobListUpload(worker, date, newJobs, mode){
+  await resetCustomerTallyForZeroBalances(newJobs);
+  await seedCustomerTallyFromBalances(newJobs);
   if(mode === 'replace'){
     await saveJobs(worker, date, newJobs);
     return { added: newJobs.length, skipped: 0 };
@@ -1891,6 +2039,7 @@ async function renderWorker(){
 
   const sorted = jobs.slice().sort((a,b)=>a.order-b.order);
   const customFrontPrices = await loadCustomFrontPrices();
+  const customerTally = await loadCustomerTally();
 
   // split jobs (worked on by two people at once) need data from the OTHER worker's
   // phone — fetched once up front here, since the two cards live on separate screens
@@ -1950,7 +2099,7 @@ async function renderWorker(){
         card = renderJobCard(worker,date,job,prog,refreshStats,isSuper,null,checkDanglingCancelled,()=>{
           const fn = balanceLinkHandlers.get(job.id);
           if(fn) fn();
-        },customFrontPrices,linked && linked.kind === 'main' ? linked.subPayment : 0);
+        },customFrontPrices,linked && linked.kind === 'main' ? linked.subPayment : 0,null,customerTally);
       }
       main.appendChild(card);
       if(onCard) onCard(job, card);
@@ -2213,9 +2362,11 @@ async function renderWorker(){
   armScreenGuard();
 }
 
-function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,onAnyStatusChange,onBalanceChange,customFrontPrices,linkedPayment,onQueueAssignment){
+function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,onAnyStatusChange,onBalanceChange,customFrontPrices,linkedPayment,onQueueAssignment,customerTally){
   customFrontPrices = customFrontPrices || {};
   linkedPayment = parseFloat(linkedPayment) || 0;
+  customerTally = customerTally || {};
+  const unpaidVisits = (job.customerId && customerTally[job.customerId]) ? (customerTally[job.customerId].count || 0) : 0;
   const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'', frontApplied:false, cancelled:false };
   const card = document.createElement('div');
   const vRound = isVRound(job.round);
@@ -2316,16 +2467,29 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     // standard rate is still there to read off to the customer if they ask, and
     // nothing is lost if the job later gets switched back to Done
 
-    const priceRef = currentPrice();
-    const showDebtKnock = owedAfter > 0.004 && priceRef > 0.004 && owedAfter >= 4 * priceRef;
+    // driven by the tracked per-customer tally (see CUSTOMER DEBT-CAP TALLY above),
+    // not by dividing today's balance by this card's own price — that division is
+    // what let a cheaper shared card (e.g. a conservatory extra) false-trigger, and
+    // what let a front-only-priced visit dodge triggering at all.
+    // unpaidVisits only counts visits already DONE and unpaid before today — this
+    // one, still sitting as todo, isn't in that count yet. So the cap needs to show
+    // once 3 are already banked (meaning today would be the 4th), not wait until 4
+    // are already banked (which would make today the 5th).
+    const showDebtKnock = owedAfter > 0.004 && unpaidVisits >= DEBT_CAP_VISITS - 1;
     // the cap stops showing once the job is actually marked Done — at that point
     // the decision's been made and acted on, so nothing more to guard against
     const relevantNow = showDebtKnock && currentStatus !== 'done';
-    if(!showDebtKnock) capDismissed = false; // only reset when the debt itself is no longer 4x+ — not just because Done is currently toggled on
+    if(!showDebtKnock) capDismissed = false; // only reset when the debt itself is no longer capped — not just because Done is currently toggled on
     capEl.style.display = (relevantNow && !capDismissed) ? 'flex' : 'none';
     // the red border is a lasting record that this job WAS overridden — unlike the
     // cap itself, it doesn't go away once marked Done or moved to Completed
     doneBtn.classList.toggle('debt-knock-overridden', wasOverridden);
+
+    // keep this job's own contribution to the customer's tally in sync with where
+    // things actually stand right now — fires on every recompute but only ever
+    // writes when this job's own done/owed state has genuinely changed (see
+    // syncUnpaidVisit), so it's safe to call this often
+    syncUnpaidVisit(job.customerId, job.id, date, currentStatus === 'done' && owedAfter > 0.004);
   }
   updateOwedAfter();
 
@@ -3542,6 +3706,7 @@ async function renderAdminDayManagement(main, header){
       const cardMap = new Map();
       const balanceLinkHandlers = new Map();
       const customFrontPrices = await loadCustomFrontPrices();
+      const customerTally = await loadCustomerTally();
 
       // build lookup maps from data we've already loaded, so a sub-card's main job
       // (which might belong to a different worker) can be found with no extra fetch
@@ -3570,7 +3735,7 @@ async function renderAdminDayManagement(main, header){
           cardEl = renderJobCard(w, date, job, prog, null, true, loadAndRender, null, ()=>{
             const fn = balanceLinkHandlers.get(job.id);
             if(fn) fn();
-          },customFrontPrices,0,queueAssignmentChange);
+          },customFrontPrices,0,queueAssignmentChange,customerTally);
         }
         listWrap.appendChild(cardEl);
         cardMap.set(job.id, cardEl);
@@ -3628,6 +3793,7 @@ async function renderAdminDayManagement(main, header){
     out.innerHTML = '';
 
     const customFrontPrices = await loadCustomFrontPrices();
+    const customerTally = await loadCustomerTally();
     // a sub-card's price edits are written to the MAIN job's own progress, not its
     // own — so its own progress never carries a price, and resolvedPrice() would
     // otherwise fall back to a frozen snapshot from when the split was created
@@ -3745,7 +3911,7 @@ async function renderAdminDayManagement(main, header){
         : renderJobCard(worker, date, job, prog, null, true, loadAndRender, null, ()=>{
             const fn = dmBalanceLinkHandlers.get(job.id);
             if(fn) fn();
-          },customFrontPrices,0,queueAssignmentChange);
+          },customFrontPrices,0,queueAssignmentChange,customerTally);
       cardEl.style.flex = '1';
       cardEl.style.marginBottom = '0';
       row.appendChild(controls);
