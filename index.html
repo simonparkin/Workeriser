@@ -1541,6 +1541,22 @@ async function rescanAllRoundsForCoords(){
 let state = { screen:'login' };
 const app = document.getElementById('app');
 
+// The worker screen refreshes itself often (5s after any edit, every time the
+// phone comes back to the app, whenever the 15s poll spots a change). It used to
+// wipe the screen first and then wait on several database reads before drawing
+// anything — on a weak signal each read can take up to 3s, so that meant a blank
+// screen for 6-8s at a time. Now the new version is built off-screen while the old
+// one stays put and usable, and only swapped in once it's completely ready.
+let workerRenderSeq = 0;        // lets a newer refresh supersede an older one still loading
+let lastAppInteractionAt = 0;   // last time someone typed/tapped a control on screen
+['input','click','change'].forEach(evt=>{
+  app.addEventListener(evt, (e)=>{
+    if(e.target && e.target.closest && e.target.closest('button,input,textarea,select,label,a')){
+      lastAppInteractionAt = Date.now();
+    }
+  }, {capture:true, passive:true});
+});
+
 // Delays a job card's move into/out of the Completed section for 5s after the
 // last interaction with that card, so cash/price/note edits can still happen
 // without the card jumping away underneath the user.
@@ -1607,14 +1623,17 @@ function startWorkerPoll(worker, date, currentJobs){
 
   async function computeLinkedSignature(){
     if(!splitJobs.length) return '';
-    const myProg = await loadProgress(worker, date);
+    // each worker's progress fetched once per check, however many splits share it
+    const progCache = new Map();
+    const progFor = w => { if(!progCache.has(w)) progCache.set(w, loadProgress(w, date)); return progCache.get(w); };
+    const myProg = await progFor(worker);
     const parts = await Promise.all(splitJobs.map(async j=>{
       if(j.isSubJob && j.mainJobWorker && j.mainJobId){
-        const mProg = await loadProgress(j.mainJobWorker, date);
+        const mProg = await progFor(j.mainJobWorker);
         const mp = (mProg||{})[j.mainJobId] || {};
         return j.id + ':' + (mp.price||'') + ':' + (mp.status||'') + ':' + (mp.payment||'');
       } else if(j.subJobWorker && j.subJobId){
-        const sProg = await loadProgress(j.subJobWorker, date);
+        const sProg = await progFor(j.subJobWorker);
         const sp = (sProg||{})[j.subJobId] || {};
         const myPrice = (myProg[j.id]||{}).price || '';
         return j.id + ':' + (sp.payment||'') + ':' + myPrice;
@@ -1901,13 +1920,17 @@ async function render(){
   lastScreenRendered = state.screen;
   app.classList.toggle('admin-wide', state.screen==='admin' || state.screen==='adminLogin');
   if(state.screen !== 'worker') stopScreenGuard();
+  const screenAtStart = state.screen;
   if(state.screen==='login') await renderLogin();
   else if(state.screen==='worker') await renderWorker();
   else if(state.screen==='daySummary') await renderDaySummary();
   else if(state.screen==='adminLogin') renderAdminLogin();
   else if(state.screen==='admin') await renderAdmin();
   else if(state.screen==='newCustomer') await renderNewCustomer();
-  if(sameScreen) window.scrollTo(0, savedScroll);
+  // the worker screen keeps its own scroll position at the moment it swaps in
+  // (the person may have scrolled while it was loading in the background, so the
+  // position from when this started would jump them back)
+  if(sameScreen && screenAtStart !== 'worker') window.scrollTo(0, savedScroll);
 }
 
 function renderNeedsSetup(){
@@ -1959,7 +1982,36 @@ async function renderWorker(){
   const worker = state.worker;
   const date = state.date || todayStr();
   state.date = date;
-  const [jobs, prog, superUsers] = await Promise.all([loadJobs(worker,date), loadProgress(worker,date), loadSuperUsers()]);
+  const seq = ++workerRenderSeq;
+  const startedAt = Date.now();
+  // everything below is built into this detached container (deliberately shadowing
+  // the real #app) and only moved onto the screen by commit() at the very end —
+  // so whatever's currently showing stays visible and usable until then
+  const realApp = document.getElementById('app');
+  const app = document.createElement('div');
+
+  // returns false (and leaves the screen alone) if this refresh is no longer wanted:
+  // a newer one has started, the person has moved to another screen, or they've
+  // tapped/typed something on the old version since this one began loading — in
+  // that last case the data this was built from may be out of date, and every edit
+  // already schedules its own fresh refresh 5s later, so nothing is missed
+  function commit(){
+    if(seq !== workerRenderSeq) return false;
+    if(state.screen !== 'worker' || state.worker !== worker || state.date !== date) return false;
+    const showingRealContent = !realApp.querySelector('.center-screen');
+    if(showingRealContent && lastAppInteractionAt > startedAt) return false;
+    const y = window.scrollY;
+    realApp.replaceChildren(...app.childNodes);
+    if(showingRealContent) window.scrollTo(0, y);
+    return true;
+  }
+
+  // everything this screen needs is fetched in one go, in parallel, rather than
+  // one read after another — each read waits up to 3s on a weak signal before
+  // falling back to the phone's saved copy, so doing them in sequence added up
+  const [jobs, prog, superUsers, customFrontPrices, customerTally] = await Promise.all([
+    loadJobs(worker,date), loadProgress(worker,date), loadSuperUsers(), loadCustomFrontPrices(), loadCustomerTally()
+  ]);
   const isSuper = superUsers.includes(worker);
   app.innerHTML = '';
 
@@ -1990,6 +2042,7 @@ async function renderWorker(){
 
   if(!jobs || !jobs.length){
     main.innerHTML = `<div class="empty-state">No job list has been loaded for ${worker} yet.<br>Ask the office to upload today's job list.</div>`;
+    commit();
     return;
   }
 
@@ -2056,20 +2109,22 @@ async function renderWorker(){
   }
 
   const sorted = jobs.slice().sort((a,b)=>a.order-b.order);
-  const customFrontPrices = await loadCustomFrontPrices();
-  const customerTally = await loadCustomerTally();
 
   // split jobs (worked on by two people at once) need data from the OTHER worker's
   // phone — fetched once up front here, since the two cards live on separate screens
-  // and can't read each other's DOM the way same-page linked jobs do
+  // and can't read each other's DOM the way same-page linked jobs do. Each other
+  // worker's list/progress is only fetched once, however many splits share them.
+  const otherJobsCache = new Map(), otherProgCache = new Map();
+  const otherJobs = w => { if(!otherJobsCache.has(w)) otherJobsCache.set(w, loadJobs(w, date)); return otherJobsCache.get(w); };
+  const otherProg = w => { if(!otherProgCache.has(w)) otherProgCache.set(w, loadProgress(w, date)); return otherProgCache.get(w); };
   const linkedDataMap = new Map();
   await Promise.all(sorted.map(async j=>{
     if(j.isSubJob && j.mainJobWorker && j.mainJobId){
-      const [mJobs, mProg] = await Promise.all([loadJobs(j.mainJobWorker, date), loadProgress(j.mainJobWorker, date)]);
+      const [mJobs, mProg] = await Promise.all([otherJobs(j.mainJobWorker), otherProg(j.mainJobWorker)]);
       const mainJob = (mJobs||[]).find(mj=>mj.id===j.mainJobId);
       if(mainJob) linkedDataMap.set(j.id, { kind:'sub', mainJob, mainProg: mProg||{} });
     } else if(j.subJobWorker && j.subJobId){
-      const subProg = await loadProgress(j.subJobWorker, date);
+      const subProg = await otherProg(j.subJobWorker);
       const subP = (subProg||{})[j.subJobId] || {};
       linkedDataMap.set(j.id, { kind:'main', subPayment: parseFloat(subP.payment)||0 });
     }
@@ -2376,6 +2431,16 @@ async function renderWorker(){
   }
 
   refreshStats();
+  if(!commit()){
+    // dropped because they tapped/typed on the old version mid-load — try again
+    // shortly, unless something else has refreshed (or left) the screen meanwhile
+    if(seq === workerRenderSeq && state.screen === 'worker' && state.worker === worker){
+      setTimeout(()=>{
+        if(seq === workerRenderSeq && state.screen === 'worker' && state.worker === worker) render();
+      }, 5000);
+    }
+    return;
+  }
   startWorkerPoll(worker, date, jobs);
   armScreenGuard();
 }
@@ -2384,7 +2449,12 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
   customFrontPrices = customFrontPrices || {};
   linkedPayment = parseFloat(linkedPayment) || 0;
   customerTally = customerTally || {};
-  const unpaidVisits = (job.customerId && customerTally[job.customerId]) ? (customerTally[job.customerId].count || 0) : 0;
+  const tallyEntry = (job.customerId && customerTally[job.customerId]) || null;
+  const unpaidVisits = tallyEntry ? (tallyEntry.count || 0) : 0;
+  // whether this job is already counted toward today in the tally as loaded —
+  // so a sync is only sent when this card's state actually differs from that,
+  // rather than every card hitting the database every time the screen refreshes
+  let tallyCountedState = !!(tallyEntry && tallyEntry.seen && (tallyEntry.seen[date]||[]).includes(job.id));
   const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'', frontApplied:false, cancelled:false };
   const card = document.createElement('div');
   const vRound = isVRound(job.round);
@@ -2504,10 +2574,13 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     doneBtn.classList.toggle('debt-knock-overridden', wasOverridden);
 
     // keep this job's own contribution to the customer's tally in sync with where
-    // things actually stand right now — fires on every recompute but only ever
-    // writes when this job's own done/owed state has genuinely changed (see
-    // syncUnpaidVisit), so it's safe to call this often
-    syncUnpaidVisit(job.customerId, job.id, date, currentStatus === 'done' && owedAfter > 0.004);
+    // things actually stand right now — only contacts the database when this
+    // card's done/owed state has actually changed from what's already recorded
+    const shouldCount = !!job.customerId && currentStatus === 'done' && owedAfter > 0.004;
+    if(job.customerId && shouldCount !== tallyCountedState){
+      tallyCountedState = shouldCount;
+      syncUnpaidVisit(job.customerId, job.id, date, shouldCount);
+    }
   }
   updateOwedAfter();
 
