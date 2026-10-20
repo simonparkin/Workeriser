@@ -532,7 +532,89 @@ async function fsSet(key, value){
 }
 
 /* ================= CONFIG / STORAGE ================= */
-const WORKERS = ['Simon','Jim','Lily','Shane','Vlado'];
+// The team list is managed from Office > Settings and stored in the database, so
+// people can be added or removed without editing this file. These are only the
+// starting defaults, used until a saved list exists (or if it can't be loaded).
+//   WORKERS          — current team: login buttons, upload, Day Management,
+//                      assign boxes, "send to", super users
+//   REMOVED_WORKERS  — former team members: hidden everywhere except Reports, so
+//                      their past records stay viewable
+// Both arrays are updated in place (never reassigned) so every bit of code
+// already holding a reference to them sees the change.
+const DEFAULT_WORKERS = ['Simon','Jim','Lily','Shane','Vlado'];
+const WORKERS = DEFAULT_WORKERS.slice();
+const REMOVED_WORKERS = [];
+const ROSTER_LOCAL_KEY = 'wjt_roster';
+let rosterLoadedFromServer = false;
+
+function applyRoster(r){
+  if(!r || !Array.isArray(r.active) || !r.active.length) return false;
+  WORKERS.splice(0, WORKERS.length, ...r.active);
+  REMOVED_WORKERS.splice(0, REMOVED_WORKERS.length, ...(Array.isArray(r.removed) ? r.removed : []));
+  return true;
+}
+// everyone who has ever been on the team — for reports, and for anything that has
+// to find a job wherever it lives (e.g. checking a split's other half still exists)
+function allWorkersEver(){ return [...WORKERS, ...REMOVED_WORKERS.filter(w=>!WORKERS.includes(w))]; }
+
+async function refreshWorkerRoster(){
+  const r = await fsGet('worker_roster');
+  if(applyRoster(r)){
+    rosterLoadedFromServer = true;
+    try{ localStorage.setItem(ROSTER_LOCAL_KEY, JSON.stringify(r)); }catch(e){}
+    return;
+  }
+  // nothing from the database (never saved yet, or no signal and nothing cached by
+  // Firestore) — fall back to the last list this phone saw, so a newly added person
+  // isn't missing from the front page just because of a bad signal
+  try{
+    const local = JSON.parse(localStorage.getItem(ROSTER_LOCAL_KEY) || 'null');
+    applyRoster(local);
+  }catch(e){}
+}
+
+// add/remove/restore all go through a transaction, so two office phones changing
+// the team at the same moment can't overwrite each other's change
+async function updateWorkerRoster(mutator){
+  if(!db){ toast('Not connected to the database'); return false; }
+  const ref = doc(db,'workeriser','worker_roster');
+  let result = null;
+  try{
+    await runTransactionOnline(db, async (tx)=>{
+      const snap = await tx.get(ref);
+      const cur = snap.exists() ? (snap.data().value || {}) : {};
+      const roster = {
+        active: (Array.isArray(cur.active) && cur.active.length) ? cur.active.slice() : WORKERS.slice(),
+        removed: Array.isArray(cur.removed) ? cur.removed.slice() : REMOVED_WORKERS.slice()
+      };
+      const err = mutator(roster);
+      if(err){ result = { error: err }; return; }
+      tx.set(ref, { value: roster, updatedAt: Date.now() });
+      result = { roster };
+    });
+  }catch(err){
+    console.error('updateWorkerRoster failed', err);
+    toast(err && err.message && err.message.includes('internet') ? err.message : 'Connection problem — please try again');
+    return false;
+  }
+  if(result && result.error){ toast(result.error); return false; }
+  if(result && result.roster){
+    applyRoster(result.roster);
+    try{ localStorage.setItem(ROSTER_LOCAL_KEY, JSON.stringify(result.roster)); }catch(e){}
+    return true;
+  }
+  return false;
+}
+
+// names become part of the database keys for each person's lists, so they're kept
+// to plain characters; "ALL" and "undefined" are reserved by Day Management
+function validateWorkerName(name){
+  if(!name) return 'Enter a name';
+  if(name.length > 20) return 'Keep the name to 20 characters or fewer';
+  if(!/^[A-Za-z0-9][A-Za-z0-9 .'-]*$/.test(name)) return 'Use letters, numbers, spaces, hyphens or apostrophes only';
+  if(['all','undefined'].includes(name.toLowerCase())) return 'That name is reserved — pick another';
+  return null;
+}
 // Required whenever the office area hasn't had a custom password set for this
 // shared database. Visible to anyone who views the page source — this is a
 // "keep casual browsers out" lock, not real security.
@@ -573,7 +655,9 @@ async function saveProgress(worker,date,prog){ await fsSet(`progress_${worker}_$
 // stored as a list rather than hardcoded so it isn't tied to one specific person.
 async function loadSuperUsers(){
   const list = await fsGet('super_users');
-  return (list && list.length) ? list : ['Simon'];
+  // only current team members count — a removed person can't be sent rejected jobs
+  const active = (list || []).filter(w=>WORKERS.includes(w));
+  return active.length ? active : [WORKERS[0]];
 }
 async function saveSuperUsers(list){
   await fsSet('super_users', list);
@@ -876,7 +960,8 @@ async function rejectSubJobForMainStatus(mainWorker, mainJob, date){
   if(!mainJob.subJobWorker || !mainJob.subJobId) return;
   const subWorker = mainJob.subJobWorker, subJobId = mainJob.subJobId;
   const superUsers = await loadSuperUsers();
-  const target = mainJob.lastAssignedBy || superUsers[0] || 'Simon';
+  // never send it back to someone who's since been removed from the team
+  const target = (mainJob.lastAssignedBy && WORKERS.includes(mainJob.lastAssignedBy)) ? mainJob.lastAssignedBy : superUsers[0];
   await moveJobsToWorker(subWorker, target, date, [subJobId]);
   if(!db) return;
   const mainJobsRef = doc(db,'workeriser',`jobs_${mainWorker}_${date}`);
@@ -1056,7 +1141,10 @@ async function applyFrontBackAssignment(cardWorker, cardJob, date, newAssignment
 // worker it lands on isn't right. Returns how many it fixed, so the caller can let
 // the person know something needed healing rather than fixing it invisibly.
 async function healBrokenSplitLinks(date){
-  const results = await Promise.all(WORKERS.map(async w=> ({ w, jobs: (await loadJobs(w, date)) || [] })));
+  // checks former team members' lists too — on a past date, a split's other half
+  // may legitimately live with someone since removed, and missing that would make
+  // a perfectly good link look broken and get wrongly "repaired"
+  const results = await Promise.all(allWorkersEver().map(async w=> ({ w, jobs: (await loadJobs(w, date)) || [] })));
   const jobsByWorker = new Map();
   results.forEach(({w, jobs})=>{
     const m = new Map();
@@ -1943,7 +2031,9 @@ function renderNeedsSetup(){
 /* ================= LOGIN ================= */
 async function renderLogin(){
   const today = todayStr();
-  const info = await Promise.all(WORKERS.map(async w=>{
+  await refreshWorkerRoster(); // only current team members get a button
+  const team = WORKERS.slice();
+  const info = await Promise.all(team.map(async w=>{
     const jobs = await loadJobs(w,today);
     return { date: today, hasJobs: !!(jobs && jobs.length) };
   }));
@@ -1963,13 +2053,13 @@ async function renderLogin(){
   `;
   app.appendChild(wrap);
   const list = wrap.querySelector('#workerList');
-  WORKERS.forEach((w,i)=>{
+  team.forEach((w,i)=>{
     const b = document.createElement('button');
     b.className = 'worker-btn';
     const { date, hasJobs } = info[i];
     const sub = hasJobs ? `Job list loaded · ${date}` : 'No job list loaded yet';
-    b.innerHTML = `<div class="worker-avatar">${w[0]}</div>
-      <div><div class="name">${w}</div><div class="sub">${sub}</div></div>
+    b.innerHTML = `<div class="worker-avatar">${escapeHtml(w[0])}</div>
+      <div><div class="name">${escapeHtml(w)}</div><div class="sub">${sub}</div></div>
       <div class="chev">›</div>`;
     b.onclick = ()=> go('worker', { worker:w });
     list.appendChild(b);
@@ -2009,9 +2099,23 @@ async function renderWorker(){
   // everything this screen needs is fetched in one go, in parallel, rather than
   // one read after another — each read waits up to 3s on a weak signal before
   // falling back to the phone's saved copy, so doing them in sequence added up
-  const [jobs, prog, superUsers, customFrontPrices, customerTally] = await Promise.all([
-    loadJobs(worker,date), loadProgress(worker,date), loadSuperUsers(), loadCustomFrontPrices(), loadCustomerTally()
+  const [jobs, prog, , rawSuperUsers, customFrontPrices, customerTally] = await Promise.all([
+    loadJobs(worker,date), loadProgress(worker,date), refreshWorkerRoster(), fsGet('super_users'), loadCustomFrontPrices(), loadCustomerTally()
   ]);
+  // a phone still signed in as someone who's since been removed from the team —
+  // only acted on when they're explicitly on the removed list, never just because
+  // the name is missing (a bad signal could leave this phone with an older list
+  // that doesn't include someone newly added yet)
+  if(REMOVED_WORKERS.includes(worker) && !WORKERS.includes(worker)){
+    if(seq === workerRenderSeq && state.screen === 'worker' && state.worker === worker){
+      toast(`${worker} is no longer on the team list`);
+      go('login');
+    }
+    return;
+  }
+  // filtered against the team list just loaded, same rule as loadSuperUsers()
+  const activeSupers = (rawSuperUsers || []).filter(w=>WORKERS.includes(w));
+  const superUsers = activeSupers.length ? activeSupers : [WORKERS[0]];
   const isSuper = superUsers.includes(worker);
   app.innerHTML = '';
 
@@ -2652,9 +2756,9 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
   if(rejectBtn){
     rejectBtn.onclick = async ()=>{
       let target = job.lastAssignedBy;
-      if(!target){
+      if(!target || !WORKERS.includes(target)){ // never back to someone since removed
         const superUsers = await loadSuperUsers();
-        target = superUsers[0] || 'Simon';
+        target = superUsers[0];
       }
       if(!confirm(`Reject this job and send it back to ${target}?\n\n${job.address}\n\nIt will disappear from your list.`)) return;
       rejectBtn.disabled = true;
@@ -3481,6 +3585,7 @@ function renderAdminLogin(){
 
 /* ================= ADMIN AREA ================= */
 async function renderAdmin(){
+  await refreshWorkerRoster(); // so every tab below works from the current team list
   app.innerHTML = '';
   const header = document.createElement('div');
   header.className = 'topbar';
@@ -3517,7 +3622,7 @@ async function renderAdmin(){
 async function renderAdminUpload(main){
   const card = document.createElement('div');
   card.className = 'card pad';
-  const options = WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
+  const options = WORKERS.map(w=>`<option value="${escapeHtml(w)}">${escapeHtml(w)}</option>`).join('');
   card.innerHTML = `
     <div class="section-title">Upload a job list CSV</div>
     <div class="stack">
@@ -3680,7 +3785,7 @@ async function renderAdminUpload(main){
 async function renderAdminDayManagement(main, header){
   const card = document.createElement('div');
   card.className = 'card pad';
-  const options = `<option value="ALL">All workers</option>` + WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('') + `<option value="undefined">⚠ Recover orphaned jobs</option>`;
+  const options = `<option value="ALL">All workers</option>` + WORKERS.map(w=>`<option value="${escapeHtml(w)}">${escapeHtml(w)}</option>`).join('') + `<option value="undefined">⚠ Recover orphaned jobs</option>`;
   card.innerHTML = `
     <div class="section-title">Day management</div>
     <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">View and correct any worker's list for any date — add notes, adjust prices, fix statuses. Works for jobs still to come or already completed.</p>
@@ -4071,7 +4176,10 @@ async function renderAdminDayManagement(main, header){
 function renderAdminReport(main){
   const card = document.createElement('div');
   card.className = 'card pad';
-  const options = `<option value="ALL">All workers</option>` + WORKERS.map(w=>`<option value="${w}">${w}</option>`).join('');
+  // reports keep former team members, so their past days can still be looked up
+  const options = `<option value="ALL">All workers</option>`
+    + WORKERS.map(w=>`<option value="${escapeHtml(w)}">${escapeHtml(w)}</option>`).join('')
+    + REMOVED_WORKERS.filter(w=>!WORKERS.includes(w)).map(w=>`<option value="${escapeHtml(w)}">${escapeHtml(w)} (removed)</option>`).join('');
   card.innerHTML = `
     <div class="section-title">View a report</div>
     <div class="stack">
@@ -4089,7 +4197,7 @@ function renderAdminReport(main){
     const out = card.querySelector('#rOut');
 
     if(worker === 'ALL'){
-      const results = await Promise.all(WORKERS.map(async w=>{
+      const results = await Promise.all(allWorkersEver().map(async w=>{
         const { jobs, prog } = await loadForReport(w,date);
         return { w, jobs: jobs || [], prog: prog || {} };
       }));
@@ -4167,7 +4275,7 @@ function renderAdminReport(main){
       });
       const outstanding = mergedRows.reduce((s,r)=> s + r.owedAfter, 0);
       mergedRows.sort((a,b)=> roundOrderRank(a.job,lookup) - roundOrderRank(b.job,lookup));
-      const earnedRows = WORKERS.filter(w=>earnedByWorker[w]);
+      const earnedRows = allWorkersEver().filter(w=>earnedByWorker[w]);
       const totalEarned = earnedRows.reduce((s,w)=> s + earnedByWorker[w], 0);
       out.innerHTML = `
         <table class="report">
@@ -4250,9 +4358,152 @@ function renderAdminReport(main){
   card.querySelector('#rGo').onclick = showReport;
 }
 
-async function renderAdminSettings(main){
+// any jobs still to do on this person's lists from today onwards. Removing someone
+// with work still sitting on their list would leave those jobs on a list nobody can
+// open — so removal is held back until they've been moved to someone else.
+async function outstandingJobsFor(worker){
+  const today = todayStr();
+  const dates = new Set();
+  const meta = await getMeta();
+  (meta.rounds || []).forEach(key=>{
+    const [w, d] = key.split('|');
+    if(w === worker && d >= today) dates.add(d);
+  });
+  // lists added to in "Add" upload mode aren't always recorded in that index, so
+  // also look directly at the next fortnight
+  for(let i=0;i<15;i++){
+    const d = new Date();
+    d.setDate(d.getDate()+i);
+    dates.add(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'));
+  }
+  const found = [];
+  await Promise.all([...dates].map(async d=>{
+    const [jobs, prog] = await Promise.all([loadJobs(worker,d), loadProgress(worker,d)]);
+    const todo = (jobs||[]).filter(j=> !prog[j.id] || prog[j.id].status === 'todo');
+    if(todo.length) found.push({ date:d, count: todo.length });
+  }));
+  return found.sort((a,b)=> a.date < b.date ? -1 : 1);
+}
+
+function renderTeamCard(main){
   const card = document.createElement('div');
   card.className = 'card pad';
+  const removedOnly = REMOVED_WORKERS.filter(w=>!WORKERS.includes(w));
+  const rowStyle = 'display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);';
+  const smallBtn = 'border-radius:8px;padding:6px 12px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit;background:transparent;';
+  card.innerHTML = `
+    <div class="section-title">Team</div>
+    <p class="muted" style="font-size:12.5px;margin-top:-4px;line-height:1.5;">Removing someone takes them off the front page, uploads, Day Management, the assign boxes and "send to" lists. Their past days stay in Reports, and they can be restored at any time.</p>
+    <div style="margin-top:6px;">
+      ${WORKERS.map(w=>`
+        <div style="${rowStyle}">
+          <div style="flex:1;font-size:14px;font-weight:600;">${escapeHtml(w)}</div>
+          <button type="button" class="team-remove-btn" data-name="${escapeHtml(w)}" style="${smallBtn}border:1.5px solid var(--red);color:var(--red);"${WORKERS.length<=1?' disabled':''}>Remove</button>
+        </div>`).join('')}
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px;align-items:stretch;">
+      <div class="field" style="flex:1;margin:0;"><input type="text" id="teamNewName" placeholder="New person's name" maxlength="20" autocomplete="off"></div>
+      <button type="button" class="btn btn-primary" id="teamAddBtn">Add</button>
+    </div>
+    ${removedOnly.length ? `
+      <div class="section-title" style="margin-top:18px;font-size:13px;">Removed</div>
+      ${removedOnly.map(w=>`
+        <div style="${rowStyle}">
+          <div style="flex:1;font-size:14px;color:var(--ink-soft);">${escapeHtml(w)}</div>
+          <button type="button" class="team-restore-btn" data-name="${escapeHtml(w)}" style="${smallBtn}border:1.5px solid var(--blue);color:var(--blue);">Restore</button>
+        </div>`).join('')}
+    ` : ''}
+  `;
+  main.appendChild(card);
+
+  const nameInput = card.querySelector('#teamNewName');
+  card.querySelector('#teamAddBtn').onclick = async ()=>{
+    const name = nameInput.value.trim().replace(/\s+/g,' ');
+    const problem = validateWorkerName(name);
+    if(problem){ toast(problem); return; }
+    let restored = null;
+    const ok = await updateWorkerRoster(roster=>{
+      const lower = name.toLowerCase();
+      if(roster.active.some(w=>w.toLowerCase()===lower)) return `${name} is already on the team`;
+      // same name as someone removed earlier: bring that person back (with their
+      // history) rather than creating a second, separate person with the same name
+      const prev = roster.removed.find(w=>w.toLowerCase()===lower);
+      if(prev){
+        roster.removed = roster.removed.filter(w=>w!==prev);
+        roster.active.push(prev);
+        restored = prev;
+      } else {
+        roster.active.push(name);
+      }
+      return null;
+    });
+    if(!ok) return;
+    toast(restored ? `${restored} restored (with their past records)` : `${name} added`);
+    render();
+  };
+  nameInput.addEventListener('keydown', e=>{ if(e.key === 'Enter') card.querySelector('#teamAddBtn').click(); });
+
+  card.querySelectorAll('.team-remove-btn').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const name = btn.dataset.name;
+      if(WORKERS.length <= 1){ toast('There must be at least one person on the team'); return; }
+      btn.disabled = true;
+      btn.textContent = 'Checking…';
+      const outstanding = await outstandingJobsFor(name);
+      if(outstanding.length){
+        btn.disabled = false;
+        btn.textContent = 'Remove';
+        const lines = outstanding.map(o=>`  ${o.date}: ${o.count} job${o.count===1?'':'s'}`).join('\n');
+        alert(`${name} still has jobs to do:\n\n${lines}\n\nMove them to someone else in Day Management first, then remove ${name}.`);
+        return;
+      }
+      if(!confirm(`Remove ${name} from the team?\n\nTheir button will go from the front page and they'll be taken off uploads, Day Management and the assign lists. Their past days stay in Reports, and you can restore them later.`)){
+        btn.disabled = false;
+        btn.textContent = 'Remove';
+        return;
+      }
+      const ok = await updateWorkerRoster(roster=>{
+        if(!roster.active.includes(name)) return `${name} isn't on the team list any more`;
+        if(roster.active.length <= 1) return 'There must be at least one person on the team';
+        roster.active = roster.active.filter(w=>w!==name);
+        if(!roster.removed.includes(name)) roster.removed.push(name);
+        return null;
+      });
+      if(!ok){ btn.disabled = false; btn.textContent = 'Remove'; return; }
+      // take them off the super users list too, so rejected jobs can't be sent to them
+      const supers = (await fsGet('super_users')) || [];
+      if(supers.includes(name)){
+        const remaining = supers.filter(w=>w!==name);
+        await saveSuperUsers(remaining.length ? remaining : [WORKERS[0]]);
+      }
+      toast(`${name} removed`);
+      render();
+    };
+  });
+
+  card.querySelectorAll('.team-restore-btn').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const name = btn.dataset.name;
+      btn.disabled = true;
+      const ok = await updateWorkerRoster(roster=>{
+        if(roster.active.includes(name)) return `${name} is already on the team`;
+        roster.removed = roster.removed.filter(w=>w!==name);
+        roster.active.push(name);
+        return null;
+      });
+      if(!ok){ btn.disabled = false; return; }
+      toast(`${name} restored`);
+      render();
+    };
+  });
+}
+
+async function renderAdminSettings(main){
+  renderTeamCard(main);
+
+  const card = document.createElement('div');
+  card.className = 'card pad';
+  card.style.marginTop = '14px';
   card.innerHTML = `
     <div class="section-title">Change office password</div>
     <p class="muted" style="font-size:12.5px;margin-top:-4px;">This is shared — changing it updates the password required on every phone, not just this one.</p>
