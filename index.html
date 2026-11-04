@@ -1310,141 +1310,162 @@ function rowsToJobs(rows){
 }
 
 /* ================= CUSTOMER DEBT-CAP TALLY ================= */
-// The "4th time" cap used to be worked out by dividing a job's current balance by
-// its own price. That breaks in two real situations: a customer with more than one
-// job card sharing the same office balance (e.g. a conservatory extra that's only
-// done every other visit) divides the shared debt by whichever card's own price is
-// smaller and false-triggers on that card specifically; and a visit charged at the
-// front-only price divides by the wrong price and can fail to trigger at all.
+// The "4th time" cover counts how many visits IN A ROW a customer has had cleaned
+// without paying anything, tracked per CUSTOMER (keyed by Aworka Customer ID /
+// Customer Ref / name+address, see rowsToJobs) so all of a customer's cards share it.
 //
-// Instead, this tracks a plain running count — per CUSTOMER, not per job card — of
-// how many visits have gone by with money still owed afterwards. It's stored once
-// here (keyed by the customer's Aworka Customer ID / Customer Ref, see rowsToJobs),
-// so every card for that customer reads the same number regardless of its own price.
-// Reset to zero the moment a CSV upload shows that customer's office balance has
-// come back down to £0 — the point at which the office considers them settled.
+// Version 1 of this counted every visit that left ANY balance owing, even when the
+// customer paid that day. A customer who always pays for the previous clean (so
+// always carries one visit's balance) had every visit counted, and the cover
+// appeared after three perfectly normal visits. Version 2, below, counts only visits
+// with no payment at all, and any payment starts the count again from zero.
 //
-// Each customer's entry also remembers exactly which job card(s) caused each date
-// to count, so one card for a customer clearing its own balance doesn't wrongly
-// cancel out another card for the same customer/date that still has money owed.
+// Each customer's entry records, per date, which job cards were:
+//   seen[date] — done, with nothing paid that day and money still owed
+//   paid[date] — any payment taken that day (by any card, or by the other half
+//                of a split)
+// The count is the number of unpaid dates AFTER the most recent paid date. Keeping
+// the raw per-card records (rather than a running number) means that correcting a
+// card — un-ticking Done, deleting a mistyped payment — puts the count back exactly.
+//
+// Also:
+//   resetBefore — set by a CSV upload showing a £0 balance (the office's own sign
+//                 the customer is settled): nothing before that list's date counts
+//   seed        — a one-off estimate of unpaid visits that happened before this
+//                 customer was tracked (their balance ÷ their combined price),
+//                 dropped as soon as they pay anything or are reset
+//   v: 2        — marks the new format; old-format entries are ignored and
+//                 re-seeded, since their counts were built on the faulty rule
 const DEBT_CAP_VISITS = 4;
 
 async function loadCustomerTally(){ return (await fsGet('customer_tally')) || {}; }
 
-// called whenever a card's own status/payment/price settles into a new state —
-// idempotent and safe to call repeatedly with the same inputs, since it only
-// writes when this specific job's contribution to this date actually changes.
-async function syncUnpaidVisit(customerId, jobId, date, shouldCount){
+function tallyHasJobs(map, d){ return !!(map && map[d] && map[d].length); }
+
+// unpaid visits in a row up to now. excludeUnpaidOn leaves out an unpaid record for
+// the day being looked at, so the cover for today's visit counts only earlier ones.
+function tallyCount(entry, excludeUnpaidOn){
+  if(!entry || entry.v !== 2) return 0;
+  const reset = entry.resetBefore || '';
+  const paidDates = Object.keys(entry.paid || {}).filter(d=> tallyHasJobs(entry.paid, d) && d >= reset).sort();
+  const lastPaid = paidDates.length ? paidDates[paidDates.length-1] : '';
+  let n = Object.keys(entry.seen || {}).filter(d=>
+    tallyHasJobs(entry.seen, d) && d !== excludeUnpaidOn && d >= reset && d > lastPaid
+  ).length;
+  if(entry.seed && entry.seed.count > 0 && reset <= entry.seed.asOf && (!lastPaid || lastPaid < entry.seed.asOf)){
+    n += entry.seed.count;
+  }
+  return n;
+}
+
+// one-off estimate for a customer not yet tracked under version 2: balance divided
+// by the combined price of all their cards (so a cheap extra-item card can't
+// inflate it), capped as a sanity limit
+function estimateUnpaidVisits(balance, combinedPrice){
+  const debt = -(balance || 0);
+  if(debt <= 0.004 || combinedPrice <= 0.004) return 0;
+  return Math.min(20, Math.floor(debt / combinedPrice + 0.0001));
+}
+
+function groupJobsByCustomer(jobs){
+  const groups = new Map();
+  (jobs || []).forEach(j=>{
+    if(!j || !j.customerId || j.isSubJob) return; // a split's back half repeats the main job's price
+    const g = groups.get(j.customerId) || { balance: j.balance || 0, price: 0 };
+    g.price += (j.price || 0);
+    groups.set(j.customerId, g);
+  });
+  return groups;
+}
+
+// for display: any customer on screen without a version-2 entry gets a provisional
+// one built from their balance, so the cover still works on lists uploaded before
+// this change. Nothing is saved until one of their cards changes state.
+function prepareTallyView(customerTally, jobs, date){
+  const view = Object.assign({}, customerTally || {});
+  groupJobsByCustomer(jobs).forEach((g, id)=>{
+    if(view[id] && view[id].v === 2) return;
+    view[id] = { v:2, seen:{}, paid:{}, seed:{ count: estimateUnpaidVisits(g.balance, g.price), asOf: date }, provisional:true };
+  });
+  return view;
+}
+
+// records what one card says about one date: 'paid', 'unpaid' or null (neither —
+// e.g. still to do, skipped with nothing paid, or done but in credit). Only writes
+// when that card's own record for that date actually changes.
+async function syncCustomerVisit(customerId, jobId, date, state, seedIfNew){
   if(!customerId || !db) return;
   const ref = doc(db,'workeriser','customer_tally');
   try{
     await runTransactionOnline(db, async (tx)=>{
       const snap = await tx.get(ref);
       const all = snap.exists() ? (snap.data().value || {}) : {};
-      const existing = all[customerId] || { count:0, seen:{} };
-      const entry = { count: existing.count || 0, seen: Object.assign({}, existing.seen||{}) };
-      const dateJobs = new Set(entry.seen[date] || []);
-      const hadDate = dateJobs.size > 0;
-      if(shouldCount){
-        if(dateJobs.has(jobId)) return; // no change — skip the write entirely
-        dateJobs.add(jobId);
-      } else {
-        if(!dateJobs.has(jobId)) return; // no change — skip the write entirely
-        dateJobs.delete(jobId);
-      }
-      const hasDateNow = dateJobs.size > 0;
-      if(hasDateNow) entry.seen[date] = Array.from(dateJobs);
-      else delete entry.seen[date];
-      if(!hadDate && hasDateNow) entry.count += 1;
-      else if(hadDate && !hasDateNow) entry.count = Math.max(0, entry.count - 1);
-      all[customerId] = entry;
+      const existing = all[customerId];
+      const isNew = !existing || existing.v !== 2;
+      const e = isNew
+        ? { v:2, seen:{}, paid:{} }
+        : Object.assign({}, existing, { seen: Object.assign({}, existing.seen||{}), paid: Object.assign({}, existing.paid||{}) });
+      if(isNew && seedIfNew && seedIfNew.count > 0) e.seed = { count: seedIfNew.count, asOf: seedIfNew.asOf };
+      const unpaid = new Set(e.seen[date] || []);
+      const paid = new Set(e.paid[date] || []);
+      const before = (unpaid.has(jobId) ? 'unpaid' : paid.has(jobId) ? 'paid' : null);
+      if(before === state && !isNew) return; // nothing to change
+      unpaid.delete(jobId); paid.delete(jobId);
+      if(state === 'unpaid') unpaid.add(jobId);
+      if(state === 'paid') paid.add(jobId);
+      if(unpaid.size) e.seen[date] = [...unpaid]; else delete e.seen[date];
+      if(paid.size) e.paid[date] = [...paid]; else delete e.paid[date];
+      e.count = tallyCount(e); // stored for reference only — always worked out fresh
+      all[customerId] = e;
       tx.set(ref, { value: all, updatedAt: Date.now() });
     });
   }catch(err){
-    console.error('syncUnpaidVisit failed', err);
+    console.error('syncCustomerVisit failed', err);
   }
 }
 
-// run against whatever rows were just uploaded (not the merged list) — a CSV
-// bringing in a £0 balance for a customer is the office's own signal that they've
-// been settled, so their tally is wiped clean rather than merely decremented.
-async function resetCustomerTallyForZeroBalances(csvJobs){
-  const zeroedIds = Array.from(new Set(
-    (csvJobs||[]).filter(j=>j.customerId && Math.abs(j.balance||0) < 0.005).map(j=>j.customerId)
-  ));
-  if(!zeroedIds.length || !db) return;
-  const ref = doc(db,'workeriser','customer_tally');
-  try{
-    await runTransactionOnline(db, async (tx)=>{
-      const snap = await tx.get(ref);
-      const all = snap.exists() ? (snap.data().value || {}) : {};
-      let changed = false;
-      zeroedIds.forEach(id=>{
-        const existing = all[id];
-        if(existing && (existing.count || (existing.seen && Object.keys(existing.seen).length))){
-          all[id] = { count:0, seen:{} };
-          changed = true;
-        }
-      });
-      if(changed) tx.set(ref, { value: all, updatedAt: Date.now() });
-    });
-  }catch(err){
-    console.error('resetCustomerTallyForZeroBalances failed', err);
-  }
-}
-
-// STOP-GAP for the first few months after this tally replaces the old balance÷price
-// mechanic: the tally starts at zero for every customer, since it can only count
-// visits it's actually seen go by. Without this, a customer genuinely several
-// unpaid visits deep right now would show nothing until that many more visits had
-// happened under the new system — up to 3-4 months for a typical round, which is
-// exactly the confusing gap being worked around here.
-//
-// So the very next time a customer's row comes in on ANY CSV upload, and the tally
-// has never tracked them before, their count is seeded from a one-off estimate:
-// their current office balance divided by the combined price of ALL their job
-// cards in that upload — not any single card's own price, which is what caused
-// the original bug (a cheap conservatory-only card dividing the whole shared
-// debt). That makes the seed itself immune to the multi-card problem, though it
-// can't recover a front-only visit from the past — it's a reasonable one-time
-// estimate, not a perfect reconstruction. A customer is only ever seeded once:
-// after this, their count is purely the real tracked tally, same as everyone else.
-async function seedCustomerTallyFromBalances(csvJobs){
+// run on each CSV upload against just the uploaded rows. A £0 balance means the
+// office has them settled: nothing before this list's date counts any more. Any
+// customer not yet on version 2 gets their one-off seed estimate.
+async function updateCustomerTallyFromUpload(csvJobs, listDate){
   if(!db) return;
-  const byCustomer = new Map();
-  (csvJobs||[]).forEach(j=>{
-    if(!j.customerId) return;
-    if(!byCustomer.has(j.customerId)) byCustomer.set(j.customerId, { balance: 0, totalPrice: 0 });
-    const entry = byCustomer.get(j.customerId);
-    entry.balance = j.balance || 0; // shared across all of a customer's rows — any one of them carries it
-    entry.totalPrice += (j.price || 0);
-  });
-  const estimates = {};
-  byCustomer.forEach((v, customerId)=>{
-    const debt = -v.balance;
-    if(debt > 0.004 && v.totalPrice > 0.004){
-      const est = Math.floor((debt / v.totalPrice) + 0.0001);
-      if(est > 0) estimates[customerId] = Math.min(est, 20); // sanity cap — this is a rough seed, not a real count
-    }
-  });
-  const ids = Object.keys(estimates);
-  if(!ids.length) return;
+  const groups = groupJobsByCustomer(csvJobs);
+  if(!groups.size) return;
   const ref = doc(db,'workeriser','customer_tally');
   try{
     await runTransactionOnline(db, async (tx)=>{
       const snap = await tx.get(ref);
       const all = snap.exists() ? (snap.data().value || {}) : {};
       let changed = false;
-      ids.forEach(id=>{
-        if(!all[id]){ // only ever seed a customer the tally has genuinely never tracked before
-          all[id] = { count: estimates[id], seen:{} };
-          changed = true;
+      groups.forEach((g, id)=>{
+        const existing = all[id];
+        const settled = Math.abs(g.balance) < 0.005;
+        if(existing && existing.v === 2){
+          if(settled && (existing.resetBefore || '') < listDate){
+            const e = Object.assign({}, existing, { resetBefore: listDate, seen:{}, paid:{} });
+            // keep only records from the list date onwards — the reset covers everything before
+            Object.keys(existing.seen||{}).forEach(d=>{ if(d >= listDate) e.seen[d] = existing.seen[d]; });
+            Object.keys(existing.paid||{}).forEach(d=>{ if(d >= listDate) e.paid[d] = existing.paid[d]; });
+            delete e.seed;
+            e.count = tallyCount(e);
+            all[id] = e;
+            changed = true;
+          }
+          return;
         }
+        // new, or still on the old faulty format: start fresh with a one-off estimate
+        const est = settled ? 0 : estimateUnpaidVisits(g.balance, g.price);
+        const e = { v:2, seen:{}, paid:{} };
+        if(settled) e.resetBefore = listDate;
+        if(est > 0) e.seed = { count: est, asOf: listDate };
+        e.count = tallyCount(e);
+        all[id] = e;
+        changed = true;
       });
       if(changed) tx.set(ref, { value: all, updatedAt: Date.now() });
     });
   }catch(err){
-    console.error('seedCustomerTallyFromBalances failed', err);
+    console.error('updateCustomerTallyFromUpload failed', err);
   }
 }
 
@@ -1456,8 +1477,7 @@ async function seedCustomerTallyFromBalances(csvJobs){
 // included). Wrapped in a transaction so it can't race a concurrent save from the
 // worker's own phone.
 async function performJobListUpload(worker, date, newJobs, mode){
-  await resetCustomerTallyForZeroBalances(newJobs);
-  await seedCustomerTallyFromBalances(newJobs);
+  await updateCustomerTallyFromUpload(newJobs, date);
   if(mode === 'replace'){
     await saveJobs(worker, date, newJobs);
     return { added: newJobs.length, skipped: 0 };
@@ -2099,9 +2119,10 @@ async function renderWorker(){
   // everything this screen needs is fetched in one go, in parallel, rather than
   // one read after another — each read waits up to 3s on a weak signal before
   // falling back to the phone's saved copy, so doing them in sequence added up
-  const [jobs, prog, , rawSuperUsers, customFrontPrices, customerTally] = await Promise.all([
+  const [jobs, prog, , rawSuperUsers, customFrontPrices, rawCustomerTally] = await Promise.all([
     loadJobs(worker,date), loadProgress(worker,date), refreshWorkerRoster(), fsGet('super_users'), loadCustomFrontPrices(), loadCustomerTally()
   ]);
+  const customerTally = prepareTallyView(rawCustomerTally, jobs, date);
   // a phone still signed in as someone who's since been removed from the team —
   // only acted on when they're explicitly on the removed list, never just because
   // the name is missing (a bad signal could leave this phone with an older list
@@ -2554,11 +2575,16 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
   linkedPayment = parseFloat(linkedPayment) || 0;
   customerTally = customerTally || {};
   const tallyEntry = (job.customerId && customerTally[job.customerId]) || null;
-  const unpaidVisits = tallyEntry ? (tallyEntry.count || 0) : 0;
-  // whether this job is already counted toward today in the tally as loaded —
-  // so a sync is only sent when this card's state actually differs from that,
-  // rather than every card hitting the database every time the screen refreshes
-  let tallyCountedState = !!(tallyEntry && tallyEntry.seen && (tallyEntry.seen[date]||[]).includes(job.id));
+  // unpaid visits in a row BEFORE today's — today's own record is left out so the
+  // cover reflects what's already happened, not the visit it's there to guard
+  const unpaidVisits = tallyCount(tallyEntry, date);
+  // what's already recorded for this card today, as loaded — a sync is only sent
+  // when this card's state actually differs from that, rather than every card
+  // hitting the database every time the screen refreshes
+  let tallySyncedState = (tallyEntry && !tallyEntry.provisional)
+    ? ((tallyEntry.seen && (tallyEntry.seen[date]||[]).includes(job.id)) ? 'unpaid'
+      : (tallyEntry.paid && (tallyEntry.paid[date]||[]).includes(job.id)) ? 'paid' : null)
+    : null;
   const p = prog[job.id] || { status:'todo', payment:'', price:'', note:'', frontApplied:false, cancelled:false };
   const card = document.createElement('div');
   const vRound = isVRound(job.round);
@@ -2680,10 +2706,13 @@ function renderJobCard(worker,date,job,prog,refreshStats,isSuper,onReassigned,on
     // keep this job's own contribution to the customer's tally in sync with where
     // things actually stand right now — only contacts the database when this
     // card's done/owed state has actually changed from what's already recorded
-    const shouldCount = !!job.customerId && currentStatus === 'done' && owedAfter > 0.004;
-    if(job.customerId && shouldCount !== tallyCountedState){
-      tallyCountedState = shouldCount;
-      syncUnpaidVisit(job.customerId, job.id, date, shouldCount);
+    // 'paid' if anything was taken today (here or by the other half of a split),
+    // 'unpaid' if cleaned with nothing taken and money owed, otherwise nothing
+    const visitState = (payment + linkedPayment) > 0.004 ? 'paid'
+      : (currentStatus === 'done' && owedAfter > 0.004) ? 'unpaid' : null;
+    if(job.customerId && visitState !== tallySyncedState){
+      tallySyncedState = visitState;
+      syncCustomerVisit(job.customerId, job.id, date, visitState, tallyEntry && tallyEntry.provisional ? tallyEntry.seed : null);
     }
   }
   updateOwedAfter();
@@ -3902,7 +3931,7 @@ async function renderAdminDayManagement(main, header){
       const cardMap = new Map();
       const balanceLinkHandlers = new Map();
       const customFrontPrices = await loadCustomFrontPrices();
-      const customerTally = await loadCustomerTally();
+      const customerTally = prepareTallyView(await loadCustomerTally(), flat.map(f=>f.job), date);
 
       // build lookup maps from data we've already loaded, so a sub-card's main job
       // (which might belong to a different worker) can be found with no extra fetch
@@ -3989,7 +4018,7 @@ async function renderAdminDayManagement(main, header){
     out.innerHTML = '';
 
     const customFrontPrices = await loadCustomFrontPrices();
-    const customerTally = await loadCustomerTally();
+    const customerTally = prepareTallyView(await loadCustomerTally(), jobs, date);
     // a sub-card's price edits are written to the MAIN job's own progress, not its
     // own — so its own progress never carries a price, and resolvedPrice() would
     // otherwise fall back to a frozen snapshot from when the split was created
